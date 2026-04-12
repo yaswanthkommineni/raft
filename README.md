@@ -13,7 +13,7 @@ This repository contains the implementation of Raft, inspired by the paper https
 5. Basic client dedup
 6. Multithreaded transport/storage metrics
 7. Logging
-8. Fault-injection tests
+8. Chaos testing/regression tests
 9. Membership changes
 10. Observability
 
