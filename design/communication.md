@@ -43,7 +43,7 @@ Response:
 Request:
 - key
 - value
-- clientId
+- clientToken
 - sequenceNum
 
 Response:
@@ -62,7 +62,7 @@ Response:
 ### Delete
 Request:
 - key
-- clientId
+- clientToken
 - sequenceNum
 
 Response:
@@ -74,7 +74,7 @@ Request:
 - key
 - expectedValue
 - newValue
-- clientId
+- clientToken
 - sequenceNum
 
 Response:
