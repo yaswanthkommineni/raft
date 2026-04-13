@@ -22,6 +22,7 @@ Request:
 
 Response:
 - term
+- index
 - success
 
 ### InstallSnapshot
