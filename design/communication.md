@@ -23,6 +23,8 @@ Request:
 Response:
 - term
 - success
+- conflictIndex
+- conflictTerm
 
 ### InstallSnapshot
 Request:
