@@ -22,7 +22,6 @@ Request:
 
 Response:
 - term
-- index
 - success
 - conflictIndex
 - conflictTerm
