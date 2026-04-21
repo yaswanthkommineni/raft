@@ -181,6 +181,7 @@ class LeaderState extends NodeState{
                 // append to log
             }
             context.readRequestChannel -> x{
+                // create a no-op entry and only respond after that got committed
             }
         }
     }
@@ -199,17 +200,32 @@ class FollowerState extends NodeState{
         // at any point of time only one request could be served
         while(true){
             // listen to the channel messages here
+            // there is no reason to support multiple appendEntries requests at a time
+            // respond first and then do the syncrhonous log patching
             context.appendEntriesRequestChannel -> x{
-
+                /*
+                    validate the term and respond with term if the term is older
+                    update heartBeat() and schedule a timeout;
+                    respond false if no entry exist at the prevLogIndex
+                    if log exist, respond true and then patch the local log
+                    if conflict, respond with the first log index of the conflicting term
+                */
             }
             context.voteRequestChannel -> x{
+                /*
 
+                */
             }
             context.writeRequestChannel -> x{
                 // redirect to leader
             }
             context.readRequestChannel -> x{
                 // redirect to leader
+            }
+            context.lastHeartbeatTime -> x{
+                /*
+                    Check if the timeout
+                */
             }
         }
     }
