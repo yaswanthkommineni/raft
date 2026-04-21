@@ -44,6 +44,17 @@ interface QueryResult{
 
 }
 
+// persistent storage to store config details
+class MembershipConfig{
+    // maps nodeId to it's info
+    Map <int, NodeInfo> nodes;
+    int lastAppliedIndex;
+    // apply membership config change
+    int apply(LogEntry entry){
+
+    }
+}
+
 class LogEntry{
     int term;
     int logIndex;
@@ -51,7 +62,6 @@ class LogEntry{
     // this can contain various types as we are supporting multiple storage mechanisms
     // the exact log type will be decoded in the implementation of the state machine
     String jsonString;
-
 }
 
 /*
@@ -65,6 +75,7 @@ interface Log {
     LogEntry getLastLog(){
 
     }
+    // check: should not delete the membership logs until it is applied to the membership config
     int deleteEntriesUpto(int logIndex){
 
     }
@@ -73,7 +84,7 @@ interface Log {
     }
     // returns conflicting index if conflict, else return 0
     // find the mismatch => jump to first index of that mismatching term and return it
-    int appendEntries(LogEntry[] entries){
+    int appendEntries(LogEntry[] entries, int prevLogIndex, int prevLogTerm){
     }
     LogEntry[] getLogEntries(int startIndex, int endIndex){
         
@@ -96,10 +107,7 @@ class Storage {
     int lastCommitted;
     int lastApplied;
     // non-persistent leader storage;
-    // leader storage should be on the leader state class
-    // int[] nextIndex;
-    // int[] matchIndex;
-    
+
     // The state machine (volatile + pesistent)
     StateMachine stateMachine;
     Channel backupIndexChannel;
@@ -110,13 +118,145 @@ class Storage {
     // call deleteEntriesUpto
     int syncLogBackup();
 
-    
+}
 
-    //channel updates
-    {
-        backupIndexChannel.consume() -> x {
-            lastBackedUp = x;
-            syncLogBackup();
+class NodeContext{
+    Channel appendEntriesRequestChannel, voteRequestChannel, writeRequestChannel, readRequestChannel;
+    NodeState state;
+    Storage storage;
+
+    // persistent storage
+    SYSTEM_TYPES systemType;
+    MembershipConfig config;
+}
+
+
+// the main class
+class RaftNode{
+    
+    void boot(){
+        // initialize the NodeContext from persistent storage and create fresh ones for the ones that are not persistent
+        // start background processes like storage syncup, health check reporting...
+        // create RPC services
+    }
+
+    void run(){
+        while(NodeContext.state != AbortState){
+            NodeContext.state = NodeContext.state.run();
         }
     }
+
+    void shutDown(){
+        // for graceful shutdown
+    }
+
+}
+
+
+interface NodeState{
+    run();
+}
+
+class AbortState extends NodeState{
+
+}
+
+class LeaderState extends NodeState{
+    // leader state
+    int[] nextIndex;
+    int[] matchIndex;
+
+    void run(){
+        // at any point of time only one request could be served
+        while(true){
+            // listen to the channel messages here
+            context.appendEntriesRequestChannel -> x{
+
+            }
+            context.voteRequestChannel -> x{
+
+            }
+            context.writeRequestChannel -> x{
+                // check and apply if membership change
+                // append to log
+            }
+            context.readRequestChannel -> x{
+            }
+        }
+    }
+    
+    
+}
+
+class FollowerState extends NodeState{
+    TimeStamp lastHeartbeatTime;
+    Channel heartBeatTimeoutChannel;
+    NodeContext context;
+
+    NodeState run(){
+
+
+        // at any point of time only one request could be served
+        while(true){
+            // listen to the channel messages here
+            context.appendEntriesRequestChannel -> x{
+
+            }
+            context.voteRequestChannel -> x{
+
+            }
+            context.writeRequestChannel -> x{
+                // redirect to leader
+            }
+            context.readRequestChannel -> x{
+                // redirect to leader
+            }
+        }
+    }
+}
+
+class CandidateState extends NodeState{
+
+}
+
+interface RPCService{
+    int startListening();
+}
+
+class AppendEntriesResponse{
+
+}
+
+class AppendEntriesRequest{
+    // the request information
+}
+
+class VoteRequestResponse{
+
+}
+
+class VoteRequest{
+    // the request information
+}
+
+class Response{
+    int code;
+    String body;
+}
+
+
+// all requests are validated before processed
+// parse the request, create a new callback channel and pass the request object along with the response channel
+// wait for the response on the response channel and then serve the request
+
+class InternalRPCService implements RPCService{
+    Channel appendEntriesRequestChannel, voteRequestChannel;
+    Response appendEntriesRPC(String request){
+    }
+    Response voteRequestRPC(String request){
+    }
+}
+
+class ClientRPCService implements RPCService{
+    Channel writeRequestChannel, readRequestChannel;
 }
