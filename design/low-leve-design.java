@@ -49,9 +49,20 @@ class MembershipConfig{
     // maps nodeId to it's info
     Map <int, NodeInfo> nodes;
     int lastAppliedIndex;
+
+    // non persistent info
+    Map <int, Channel> membershipChangeListeners;
     // apply membership config change
     int apply(LogEntry entry){
+        // apply to the local state
+        // send the membership update to the listeners
+    }
+    // send messages to these channels when teh config changed
+    int registerConfigChangeListener(Channel channel){
 
+    }
+    int deRegisterChannel(int channelId){
+        // remove channel from the map
     }
 }
 
@@ -83,8 +94,10 @@ interface Log {
 
     }
     // returns conflicting index if conflict, else return 0
-    // find the mismatch => jump to first index of that mismatching term and return it
-    int appendEntries(LogEntry[] entries, int prevLogIndex, int prevLogTerm){
+    // find the mismatch => jump to first index of that mismatching term and return then
+    // if not mismatch replace whatever after the prevLogIndex with the given entries
+    int, int appendEntries(LogEntry[] entries, int prevLogIndex, int prevLogTerm){
+        // while appending, check if the log entry is of membership change type and apply to the system if it is
     }
     LogEntry[] getLogEntries(int startIndex, int endIndex){
         
@@ -166,6 +179,66 @@ class LeaderState extends NodeState{
     int[] nextIndex;
     int[] matchIndex;
 
+    // send heart beat every heartBeatFrequency seconds
+    int heartBeatFrequency = baseTiemout/3;
+
+    // follower to thread mapper for each follower
+    Map <int, Thread> threadMapper;
+    Thread configListenerThread;
+
+    // config change listeners
+    Channel configChangeChannel, leaderChangedChannel, commitUpdatedChannel;
+
+    // For every log index, upon commit confirmation, the updates should be sent to the mapped channel
+    Queue <<int, Channel>> commitConfirmationChannel;
+
+    BroadCastChannel logUpdateChannel;
+
+
+    int leaderStartup(){
+        // start threads that execute follower communication and save the thread in the map
+        // register a chanenl for config changes
+    }
+
+    void followerCommunication(){
+        int lastHeartBeatTime;
+        Channel heartBeatExpireChannel;
+        while(true){
+            logUpdateChannel -> x{
+                // log has been updated, send append entries
+            }
+            heartBeatExpireChannel ->x {
+                // check if it is actually expired and send appendEntries if it did
+            }
+            responseChannel -> x{
+                /*
+                    check if leader is updated and put the message in channel leaderChangedChannel
+                    update the follower related details
+                    call commitUpdateCheck() asynchronously
+                */
+            }
+        }
+    }
+
+    void commitUpdateCheck(){
+        /*
+            checks if the commit is updated and if updated, put it in the channel commitUpdatedChannel
+        */
+    }
+
+    int sendAppendEntriesRPC(int followerId, Channel responseChannel, Channel heartBeatExpireChannel){
+        // set the time out after heartBeatFrequency + currentTime using heartBeatExpireChannel
+        // send the RPC and wait for result and send response over the channel
+    }
+
+    int leaderShutdown(){
+        // shutdown all the threads
+        // deregister channel
+    }
+
+    // for each log index, the channels to which the confirmation needs to be sent are stored
+    Queue <<int, Channel>> confirmationCallbackChannels;
+
     void run(){
         // at any point of time only one request could be served
         while(true){
@@ -189,10 +262,15 @@ class LeaderState extends NodeState{
     
 }
 
+// one request handled at a time so no concurrency problem, does it impact performance though?
 class FollowerState extends NodeState{
     TimeStamp lastHeartbeatTime;
     Channel heartBeatTimeoutChannel;
     NodeContext context;
+    Channel localAppendEntriesRequest;
+
+
+    int heartBeatTimeout = baseTiemout + random;
 
     NodeState run(){
 
@@ -202,19 +280,28 @@ class FollowerState extends NodeState{
             // listen to the channel messages here
             // there is no reason to support multiple appendEntries requests at a time
             // respond first and then do the syncrhonous log patching
-            context.appendEntriesRequestChannel -> x{
+            // only one message from the following two channels are processed at a time
+            localAppendEntriesRequest -> x {
                 /*
-                    validate the term and respond with term if the term is older
-                    update heartBeat() and schedule a timeout;
+                    validate the term and respond with term if the leader term is older
                     respond false if no entry exist at the prevLogIndex
                     if log exist, respond true and then patch the local log
                     if conflict, respond with the first log index of the conflicting term
+                    update the commit index
                 */
             }
             context.voteRequestChannel -> x{
                 /*
-
+                    validate for term and return false along with the latest term if the requestor is outdated
+                    if the term is same as the current term then check if votedFor is null and proceed for log validation if null return false else
+                    Check if the node asking for vote is as upto date as the follower and then grant the vote
+                    reset votedFor to null if the up to date check failed
                 */
+            }
+            // the channels below this are concurrent and can execute independently
+            context.appendEntriesRequestChannel -> x{
+                // update lastHeartbeatTime and schedule a timeout at lastHeartbeatTime + timeoutTime;
+                // push to localAppendEntriesRequest
             }
             context.writeRequestChannel -> x{
                 // redirect to leader
@@ -222,12 +309,20 @@ class FollowerState extends NodeState{
             context.readRequestChannel -> x{
                 // redirect to leader
             }
-            context.lastHeartbeatTime -> x{
+            heartBeatTimeoutChannel -> x{
                 /*
-                    Check if the timeout
+                    check if a heartbeat appeared after x - timeoutTime and ignore if it occured
+                    else call handleTimeout() and return CandidateState();
                 */
             }
         }
+    }
+
+    void handleTimeout(){
+        /*
+            shutdown all the other threads that were initiated
+            The requests that are in queue will be handled by the later state
+         */
     }
 }
 
