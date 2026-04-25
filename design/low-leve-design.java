@@ -98,6 +98,7 @@ interface Log {
     // if not mismatch replace whatever after the prevLogIndex with the given entries
     int, int appendEntries(LogEntry[] entries, int prevLogIndex, int prevLogTerm){
         // while appending, check if the log entry is of membership change type and apply to the system if it is
+        // incase of deleting logs because of conflict, don't forget to update the membership config if the deleted log is membership config
     }
     LogEntry[] getLogEntries(int startIndex, int endIndex){
         
@@ -130,6 +131,13 @@ class Storage {
 
     // call deleteEntriesUpto
     int syncLogBackup();
+
+    // call this function to update commit index
+    int updateCommitIndex() {
+        // update the commitIndex atomic operation
+        // acquire mutex lock while doing this, so that two go-routines won't be triggered applying the same entries
+        // initiate a go-routine to apply log entries from x to y
+    }
 
 }
 
@@ -187,33 +195,38 @@ class LeaderState extends NodeState{
     Thread configListenerThread;
 
     // config change listeners
-    Channel configChangeChannel, leaderChangedChannel, commitUpdatedChannel;
+    Channel configChangeChannel, leaderExpiredChannel, commitUpdatedChannel;
 
     // For every log index, upon commit confirmation, the updates should be sent to the mapped channel
-    Queue <<int, Channel>> commitConfirmationChannel;
+    Queue <<int, Channel>> commitConfirmationChannels;
 
     BroadCastChannel logUpdateChannel;
 
 
     int leaderStartup(){
+        // push a new message to the writeRequestChannel with emtpy write (no-op entry) and no response channel
         // start threads that execute follower communication and save the thread in the map
-        // register a chanenl for config changes
+        // register a chanenl for config changes (configChangeChannel)
+        // create a dummy followerif there are no followers
     }
+
 
     void followerCommunication(){
         int lastHeartBeatTime;
         Channel heartBeatExpireChannel;
         while(true){
+            // all are asyncrhonous
             logUpdateChannel -> x{
-                // log has been updated, send append entries
+                // log has been updated, send append entries by calling sendAppendEntriesRPC
             }
             heartBeatExpireChannel ->x {
                 // check if it is actually expired and send appendEntries if it did
             }
             responseChannel -> x{
                 /*
-                    check if leader is updated and put the message in channel leaderChangedChannel
+                    check if leader is updated and put the message in channel leaderExpiredChannel
                     update the follower related details
+                    note: while updating either do CAS operations or use mutex locks to avoid race conditions
                     call commitUpdateCheck() asynchronously
                 */
             }
@@ -223,6 +236,7 @@ class LeaderState extends NodeState{
     void commitUpdateCheck(){
         /*
             checks if the commit is updated and if updated, put it in the channel commitUpdatedChannel
+            also only send update if the commit index belongs to the current term
         */
     }
 
@@ -231,35 +245,77 @@ class LeaderState extends NodeState{
         // send the RPC and wait for result and send response over the channel
     }
 
+    // graceful leader shutdown
     int leaderShutdown(){
-        // shutdown all the threads
-        // deregister channel
+        // immediately shutdown go-routines that are reading from channels appendEntries, voteRequest, writeRequest, readRequest, and configChangeChannel
+        // immediately shutdown all the follower communication go-routines
+        // continously poll messages commitConfirmationChannels and respond {committed: false} to threadMapper
+        // deregister config change channel
     }
-
-    // for each log index, the channels to which the confirmation needs to be sent are stored
-    Queue <<int, Channel>> confirmationCallbackChannels;
 
     void run(){
         // at any point of time only one request could be served
         while(true){
-            // listen to the channel messages here
+            // all are asynchronous
             context.appendEntriesRequestChannel -> x{
-
+                /*
+                    Check if the term is greater than the current term
+                    if it is, put the new leaderId in the leaderExpiredChannel after responding false
+                    else respond false with the updated term
+                */
             }
             context.voteRequestChannel -> x{
-
+                /*
+                    Check if the term is greater than the current term if not respond false
+                    if it is, delegate to handleVoteRequest() and push a message to leader changed with empty leaderId;
+                */
             }
             context.writeRequestChannel -> x{
-                // check and apply if membership change
-                // append to log
+                /*
+                    push an entry in commitConfirmationChannel with response channel as the channel passed in the write request
+                    append to log
+                    broadcast in logUpdateChannel
+                */
             }
             context.readRequestChannel -> x{
-                // create a no-op entry and only respond after that got committed
+                /*
+                    Create a no-op entry in the writeRequestChannel and pass a new channel as response channel
+                    now create a new goroutine that listens to this new channel and after commit confirmation came it reads the value and returns it
+                    note: this newly created go-routine won't be immediately shut-down once the leader changed
+                */
+            }
+            configChangeChannel -> x {
+                /*
+                    detect deleted followers => kill the respective followerCommunication go-routine
+                    detect newly added followers => create the respective followerCommunication go-routine
+                */
+            }
+            commitUpdatedChannel -> x {
+                /*
+                    update the commitIndex variable
+                    Pop items from the queue commitConfirmationChannels and put confirmation messages in the popped channel
+                */
+            }
+            leaderExpiredChannel -> x {
+                /*
+                    Update the term and leader
+                    call leaderShutdown();
+                    then return FollowerState;
+                */
             }
         }
     }
-    
-    
+
+}
+
+
+void handleVoteRequest(VoteRequest request, Channel responseChannel, Storage storage){
+     /*
+        validate for term and return false along with the latest term if the requestor is outdated
+        if the term is same as the current term then check if votedFor is null and proceed for log validation if null return false else
+        Check if the node asking for vote is as upto date as the follower and then grant the vote
+        update term 
+    */
 }
 
 // one request handled at a time so no concurrency problem, does it impact performance though?
@@ -291,12 +347,64 @@ class FollowerState extends NodeState{
                 */
             }
             context.voteRequestChannel -> x{
+                // update timer and schedule a new timeout
+               // delegate to handleVoteRequest()
+            }
+            // the channels below this are concurrent and can execute independently
+            context.appendEntriesRequestChannel -> x{
+                // update lastHeartbeatTime and schedule a timeout at lastHeartbeatTime + timeoutTime;
+                // push to localAppendEntriesRequest
+            }
+            context.writeRequestChannel -> x{
+                // redirect to leader
+            }
+            context.readRequestChannel -> x{
+                // redirect to leader
+            }
+            heartBeatTimeoutChannel -> x{
                 /*
-                    validate for term and return false along with the latest term if the requestor is outdated
-                    if the term is same as the current term then check if votedFor is null and proceed for log validation if null return false else
-                    Check if the node asking for vote is as upto date as the follower and then grant the vote
-                    reset votedFor to null if the up to date check failed
+                    check if a heartbeat appeared after x - timeoutTime and ignore if it occured
+                    else call handleTimeout() and return CandidateState();
                 */
+            }
+        }
+    }
+
+    void handleTimeout(){
+        /*
+            shutdown all the other threads that were initiated
+            The requests that are in queue will be handled by the later state
+         */
+    }
+}
+
+class CandidateState extends NodeState{
+    TimeStamp lastHeartbeatTime;
+    Channel heartBeatTimeoutChannel;
+    NodeContext context;
+    Channel localAppendEntriesRequest;
+
+
+    int heartBeatTimeout = baseTiemout + random;
+
+    NodeState run(){
+
+        while(true){
+            // listen to the channel messages here
+            // there is no reason to support multiple appendEntries requests at a time
+            // respond first and then do the syncrhonous log patching
+            // only one message from the following two channels are processed at a time
+            localAppendEntriesRequest -> x {
+                /*
+                    validate the term and respond with term if the leader term is older
+                    create a goroutine to schedule a requeue for the request 
+                    if log exist, respond true and then patch the local log
+                    if conflict, respond with the first log index of the conflicting term
+                    update the commit index
+                */
+            }
+            context.voteRequestChannel -> x{
+               // delegate to handleVoteRequest()
             }
             // the channels below this are concurrent and can execute independently
             context.appendEntriesRequestChannel -> x{
