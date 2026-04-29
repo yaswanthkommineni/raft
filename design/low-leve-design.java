@@ -11,6 +11,7 @@ enum SYSTEM_TYPES{
 StateMachine getStateMachine(SYSTEM_TYPES type){
 }
 
+// the clientId request mapper is always expected to be upto date with the log, hence it should be persistent
 interface StateMachine {
     int applyLogEntry(){
 
@@ -24,6 +25,9 @@ interface StateMachine {
 
     }
     Channel backupIndexChannel(){
+
+    }
+    int getLastHandledRequestNumberForCleint(int clientId){
 
     }
     /*
@@ -47,13 +51,24 @@ interface QueryResult{
 // persistent storage to store config details
 class MembershipConfig{
     // maps nodeId to it's info
-    Map <int, NodeInfo> nodes;
+    // in case of both old membership and new membership both are active
+    Map <int, NodeInfo> [] nodes;
     int lastAppliedIndex;
 
     // non persistent info
     Map <int, Channel> membershipChangeListeners;
     // apply membership config change
     int apply(LogEntry entry){
+        // check and validate the type of membership change
+        /*
+            Rules: 
+                Only one node can be added or removed in the membership change
+                Once the membership change is done, there will be newNodes + oldNodes
+                The next membership change should always be to commit this which will cause the nodes to take values of newNodes and newNodes will be null
+
+                for new nodes => send the change to listeners when adding newMembership
+                for deletingNodes => send the change to listeners when the log comes to delete the oldMembership
+        */
         // apply to the local state
         // send the membership update to the listeners
     }
@@ -158,6 +173,7 @@ class RaftNode{
     void boot(){
         // initialize the NodeContext from persistent storage and create fresh ones for the ones that are not persistent
         // start background processes like storage syncup, health check reporting...
+        // start goroutines that monitor the channel sizes and keep responding failure if the size grows above some point
         // create RPC services
     }
 
@@ -267,11 +283,12 @@ class LeaderState extends NodeState{
             context.voteRequestChannel -> x{
                 /*
                     Check if the term is greater than the current term if not respond false
-                    if it is, delegate to handleVoteRequest() and push a message to leader changed with empty leaderId;
+                    if it is, update term, set the votedFor to null, push leader changed message and delegate to handleVoteRequest()
                 */
             }
             context.writeRequestChannel -> x{
                 /*
+                    check if the request has already been handled for idempotency by getting the last handled sequence number for client from state machine
                     push an entry in commitConfirmationChannel with response channel as the channel passed in the write request
                     append to log
                     broadcast in logUpdateChannel
@@ -286,6 +303,7 @@ class LeaderState extends NodeState{
             }
             configChangeChannel -> x {
                 /*
+                    if the config change removes leader, then call leaderExpiredChannel and return follower state
                     detect deleted followers => kill the respective followerCommunication go-routine
                     detect newly added followers => create the respective followerCommunication go-routine
                 */
@@ -311,6 +329,8 @@ class LeaderState extends NodeState{
 
 void handleVoteRequest(VoteRequest request, Channel responseChannel, Storage storage){
      /*
+        always first store and then only respond to the voteRequest
+        use CAS operations while updating term, votedFor, and leader
         validate for term and return false along with the latest term if the requestor is outdated
         if the term is same as the current term then check if votedFor is null and proceed for log validation if null return false else
         Check if the node asking for vote is as upto date as the follower and then grant the vote
@@ -379,48 +399,68 @@ class FollowerState extends NodeState{
 }
 
 class CandidateState extends NodeState{
-    TimeStamp lastHeartbeatTime;
-    Channel heartBeatTimeoutChannel;
     NodeContext context;
-    Channel localAppendEntriesRequest;
+    int gatheredVotes;
+    TimeStamp electionStartTime;
+    // push the leaderId as well if the leader is known or else keep it null
+    Channel stopElectionChannel, candidateElectedChannel, electionTimeoutChannel;
 
+    int followerCommunication(){
+        /* 
+            send the voteRequestRpc and wait for the response
+            and delegate to handleFollowerResponse once response is received
+        */
+    }
 
-    int heartBeatTimeout = baseTiemout + random;
+    int handleFollowerResponse(VoteRequestResponse response){
+        /*
+            Evaluate the response and atomic increment the gather votes if voted for and do nothing if didn't get vote
+            take care of updating term and leader race conditions
+            if a new leader or term is detected, update term and leader push a message to stopElectionChannel
+            if a follower voted and after increment, it got majority
+            in case of both oldMembership and newMembership are active, wait for both of the majorities
+        */
+    }
+
+    int candidateStartup(){
+        /*
+            Read the config membership and create a goroutine for each of the follower
+            schedule a timeout after some time
+        */
+    }
 
     NodeState run(){
 
+        // don't even take requests from writechannel or read channel because you don't know who is the leader 
+        // and you are not serving them
         while(true){
-            // listen to the channel messages here
-            // there is no reason to support multiple appendEntries requests at a time
-            // respond first and then do the syncrhonous log patching
-            // only one message from the following two channels are processed at a time
-            localAppendEntriesRequest -> x {
+            context.voteRequestChannel -> x{
                 /*
-                    validate the term and respond with term if the leader term is older
-                    create a goroutine to schedule a requeue for the request 
-                    if log exist, respond true and then patch the local log
-                    if conflict, respond with the first log index of the conflicting term
-                    update the commit index
+                    if the term > currentTerm, update term and push message to stopElectionChannel
+                    if term = currentTerm, reply false
+                    if term < currenTerm, send the currentTerm in response
                 */
             }
-            context.voteRequestChannel -> x{
-               // delegate to handleVoteRequest()
-            }
-            // the channels below this are concurrent and can execute independently
+          
             context.appendEntriesRequestChannel -> x{
-                // update lastHeartbeatTime and schedule a timeout at lastHeartbeatTime + timeoutTime;
-                // push to localAppendEntriesRequest
-            }
-            context.writeRequestChannel -> x{
-                // redirect to leader
-            }
-            context.readRequestChannel -> x{
-                // redirect to leader
-            }
-            heartBeatTimeoutChannel -> x{
                 /*
-                    check if a heartbeat appeared after x - timeoutTime and ignore if it occured
-                    else call handleTimeout() and return CandidateState();
+                    respond with current term if the term is < current term
+                    if the term >= currentTerm, update leaderId and push a message in stopElectionChannel
+                */
+            }
+            stopElectionChannel -> x {
+                /*
+                    return followerState
+                */
+            }
+            candidateElectedChannel -> x{
+                /*
+                    return leaderState
+                */
+            }
+            electionTimeoutChannel -> x{
+                /*
+                    increment term and return CandidateState to start new elctions
                 */
             }
         }
@@ -432,10 +472,6 @@ class CandidateState extends NodeState{
             The requests that are in queue will be handled by the later state
          */
     }
-}
-
-class CandidateState extends NodeState{
-
 }
 
 interface RPCService{
