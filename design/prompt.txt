@@ -1,0 +1,5 @@
+Help instruction:
+read files from this project
+the main aim of this project for me is to build a production based working raft implementation and also for me personally to be a distributed engineer and a good go developer
+so don't step on my foot and start writing things code down
+For whatever question I ask, answer like you are someone helping my but not by giving answers directly
