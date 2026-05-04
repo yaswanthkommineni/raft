@@ -13,6 +13,11 @@ type ClientId string;
 
 type SequenceNum uint64;
 
+type Node struct {
+	NodeId NodeId;
+	Address NodeAddress;
+}
+
 type LogEntry struct {
 	Term Term;
 	LogIndex LogIndex;

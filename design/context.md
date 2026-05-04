@@ -19,6 +19,28 @@ Design quality is non-negotiable. Shortcuts that compromise the learning experie
 - **Do not over-explain.** When the owner asks a focused question, give a focused answer. Long structural lectures are unwelcome unless explicitly requested.
 - **Push back on design decisions** when they would compromise learning or production quality. Be honest about trade-offs.
 - **Respect the owner's existing design** in `design/` (LLD, communication, persistence, deployment, testability). Refer to those rather than re-inventing.
+- **Time is the most valuable thing.** Default to high-signal, minimum-length responses. Elaborate only when explicitly asked.
+- **Don't bury novel ideas.** When the owner is exploring an unconventional approach, evaluate it on its merits before suggesting the conventional alternative. Don't reflexively redirect to "the standard pattern."
+
+### Code validation mode (`validate-code`)
+
+When the owner types **`validate-code`** (with or without an attached snippet), follow these rules strictly:
+
+- **High signal, minimum length.** No preambles, no recaps, no "great question." List flaws and stop.
+- **Categorize every flaw** with one of these tags:
+  - `[syntactical]` — won't compile / parse / run.
+  - `[critical-logical]` — compiles but is wrong (deadlock, race, off-by-one, contract violation).
+  - `[logical]` — works in the common case but breaks at edges.
+  - `[design]` — works correctly, but the structure could be better.
+- **For `[design]` flaws**, give the suggested design and the reason in **one line each**. Do not expand unless asked.
+- **Do not bury the owner's intent.** If they're trying something unconventional, evaluate whether it works for their stated goal before proposing the conventional pattern. If the unconventional approach is fine, say so and move on.
+- **Do not pre-emptively forecast future bugs.** Validate the code as it is, not as it might become when more goroutines / states / peers exist. If a forecast is genuinely important, mark it `[future]` and keep it to one line.
+- **No code rewrites unless asked.** Point at the line and the fix in words. The owner writes the code.
+- **Order flaws by severity**: syntactical → critical-logical → logical → design → future.
+- **Verify every flaw before raising it.** Trace through the code mentally and confirm the flaw actually manifests in the code as written. If you can't construct a concrete case where it triggers, do not raise it. Raising invalid flaws wastes the owner's time and erodes trust in the validation. When in doubt, leave it out.
+- **If the owner pushes back on a flaw, re-verify before defending.** Apply more tokens here and think deep here before if the pushback is correct, backdown. Else counter with the same rules as above.
+
+These rules apply only when `validate-code` is typed. Outside that mode, default behavior applies.
 
 ---
 

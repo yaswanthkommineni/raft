@@ -27,5 +27,5 @@ type StateMachine interface {
 }
 
 type NodeState interface {
-	Run(raftNode *RaftNode) error;
+	Run(raftNode *RaftNode) (NodeState, error);
 }

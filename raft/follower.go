@@ -8,5 +8,5 @@ type FollowerState struct {
 }
 
 func (followerState* FollowerState) Run(raftNode *RaftNode) error {
-
+	
 }
