@@ -84,3 +84,19 @@ type ClientRequestEnvelope struct {
 
 // StateMachineResponseData represents the result of applying a log entry to the state machine. It can be any byte slice, allowing for flexibility in the type of data returned by the state machine.
 type StateMachineResponseData []byte;
+
+// abort state
+type AbortState struct {
+}
+
+func (abortState* AbortState) Run(raftNode *RaftNode) (NodeState, error) {
+	return nil, errors.New("AbortState");
+}
+
+// LogIndexOutOfBoundsError
+type LogIndexOutOfBoundsError struct {
+}
+
+func (logIndexOutOfBoundsError* LogIndexOutOfBoundsError) Error() string {
+	return fmt.Sprintf("Log index out of bounds");
+}
