@@ -76,7 +76,7 @@ func (n* RaftNode) Run() error {
 					return;
 				default:
 			}
-			if _, abort := nextState.(*AbortState);  (abort || err != nil) {
+			if _, abort := nextState.(AbortState);  (abort || err != nil) {
 				n.exitErr = err;
 				n.wg.Done();
 				n.Shutdown();

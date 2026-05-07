@@ -15,6 +15,7 @@ type Store interface {
 	SetCurrentTerm(term Term) error;
 	SetVotedFor(nodeId NodeId) error;
 
+	// Could also get an empty slice, if so don't return error
 	// just blindly overwrite or append the entries at their index, the ones who are using this should deal with the logic
 	PatchEntries(entries []LogEntry) error;
 	// return LogIndexOutOfBoundsError error
@@ -23,6 +24,7 @@ type Store interface {
 	GetLastLogIndex() LogIndex;
 	GetLastLogTerm() Term;
 	GetFirstLogIndex(term Term) LogIndex;
+	// truncate last ones first
 	TruncateFrom(index LogIndex) error;
 }
 

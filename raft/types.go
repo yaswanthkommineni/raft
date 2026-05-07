@@ -97,6 +97,6 @@ func (abortState* AbortState) Run(raftNode *RaftNode) (NodeState, error) {
 type LogIndexOutOfBoundsError struct {
 }
 
-func (logIndexOutOfBoundsError* LogIndexOutOfBoundsError) Error() string {
+func (logIndexOutOfBoundsError LogIndexOutOfBoundsError) Error() string {
 	return fmt.Sprintf("Log index out of bounds");
 }
