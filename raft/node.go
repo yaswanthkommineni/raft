@@ -11,7 +11,7 @@ type RaftNode struct {
 	Membership Membership;
 
 	LastAppliedIndex LogIndex;
-	LastCommittedIndex LogIndex;
+	lastCommittedIndex LogIndex;
 
 	// Channels for inbound requests
 	AppendEntriesCh chan AppendEntriesEnvelope;
@@ -29,6 +29,12 @@ type RaftNode struct {
 	NodeState NodeState;
 }
 
+// implement thread save concurrenctly callable getters and setters for the RaftNode's state, such as the last committed index. 
+func (n* RaftNode) GetLastCommittedIndex() LogIndex {
+}
+
+func (n* RaftNode) SetLastCommittedIndex() LogIndex {
+}
 
 func (n* RaftNode) Boot() error {
 	// sets the NodeState

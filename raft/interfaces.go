@@ -17,9 +17,11 @@ type Store interface {
 
 	// Could also get an empty slice, if so don't return error
 	// just blindly overwrite or append the entries at their index, the ones who are using this should deal with the logic
+	// multiple calls can be made to this function but on different indexes, so this should be thread safe
 	PatchEntries(entries []LogEntry) error;
 	// return LogIndexOutOfBoundsError error
 	GetLogEntry(index LogIndex) (*LogEntry, error);
+	GetLogTerm(index LogIndex) (Term, error);
 	GetLogEntries(startIndex LogIndex, endIndex LogIndex) ([]LogEntry, error);
 	GetLastLogIndex() LogIndex;
 	GetLastLogTerm() Term;

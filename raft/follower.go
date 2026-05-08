@@ -11,7 +11,7 @@ type FollowerState struct {
 func (followerState* FollowerState) Run(raftNode *RaftNode) (NodeState, error) {
 	wg := sync.WaitGroup{};
 	wg.Add(6);
-	heartbeatTimeout := raftNode.Config.ElectionTimeoutMin + time.Duration(rand.Intn(int(raftNode.Config.ElectionTimeoutMax - raftNode.Config.ElectionTimeoutMin)));
+	heartbeatTimeout := raftNode.Config.ElectionTimeoutMin + time.Duration(rand.IntN(int(raftNode.Config.ElectionTimeoutMax - raftNode.Config.ElectionTimeoutMin)));
 	timer := time.NewTimer(heartbeatTimeout);
 
 	localAppendEntriesRequestChannel := make(chan AppendEntriesEnvelope, 10);
@@ -28,7 +28,7 @@ func (followerState* FollowerState) Run(raftNode *RaftNode) (NodeState, error) {
 			case x := <- raftNode.ClientRequestCh:
 				x.RespCh <- ClientResponse{
 					Success: false,
-					LeaderId: leaderId
+					LeaderId: leaderId,
 				}
 			case <- stopChan:
 				return;
@@ -36,19 +36,23 @@ func (followerState* FollowerState) Run(raftNode *RaftNode) (NodeState, error) {
 		}
 	}();
 
+	func resetTimer(){
+		if(!timer.Stop()){
+			// drain the expiry channel if already expired
+			select {
+			case <- timer.C:
+			default:
+			}
+		}
+		timer.Reset(heartbeatTimeout);
+	}
+
 	go func() {
 		defer wg.Done();
 		for {
 			select {
 			case x := <- raftNode.AppendEntriesCh:
-				if(!timer.Stop()){
-					// drain the expiry channel if already expired
-					select {
-					case <- timer.C:
-					default:
-					}
-				}
-				timer.Reset(heartbeatTimeout);
+				resetTimer();
 				localAppendEntriesRequestChannel <- x;
 			case <- stopChan:
 				return;
@@ -91,7 +95,7 @@ func (followerState* FollowerState) Run(raftNode *RaftNode) (NodeState, error) {
 			case x := <- appendSuccessReqChannel:
 				lastStoreLogIndex := raftNode.Store.GetLastLogIndex();
 				// append entries
-				entriesToPatch, firstUnmatchedIndex := getEntriesToPatch(x.Entries, x.PrevLogIndex, lastStoreIndex, raftNode.Store);
+				entriesToPatch, firstUnmatchedIndex := getEntriesToPatch(x.Entries, x.PrevLogIndex, lastStoreLogIndex, raftNode.Store);
 
 				lastEntriesIndex := firstUnmatchedIndex + LogIndex(len(entriesToPatch)) - 1;
 
@@ -101,7 +105,7 @@ func (followerState* FollowerState) Run(raftNode *RaftNode) (NodeState, error) {
 					diskwg.Add(1);
 					go func() {
 						defer diskwg.Done();
-						if((lastEntriesIndex < lastStoreLogIndex) && (firstUnmatchIndex != lastEntriesIndex + 1)){
+						if((lastEntriesIndex < lastStoreLogIndex) && (firstUnmatchedIndex != lastEntriesIndex + 1)){
 							raftNode.Store.TruncateFrom(lastEntriesIndex + 1);
 						}
 					}();
@@ -112,11 +116,11 @@ func (followerState* FollowerState) Run(raftNode *RaftNode) (NodeState, error) {
 				}
 
 				commitIndex := min(lastEntriesIndex, x.LeaderCommit);
-				raftNode.LastCommittedIndex = commitIndex;
+				raftNode.Store.SetLastCommittedIndex(commitIndex);
 				// maybe trigger a communication to the store saying that the commit index got updated
-			}
 			case <- stopChan:
 				return;
+			}
 		}
 	}();
 
@@ -134,8 +138,9 @@ func (followerState* FollowerState) Run(raftNode *RaftNode) (NodeState, error) {
 					}
 					continue;
 				} else if ((x.Req.Term > term) || (leaderId == 0)) {
-					raftNode.Store.setCurrentTerm(x.Req.Term);
-					raftNode.Store.setVotedFor(x.Req.LeaderId);
+					term = x.Req.Term;
+					raftNode.Store.SetCurrentTerm(x.Req.Term);
+					raftNode.Store.SetVotedFor(x.Req.LeaderId);
 					leaderId = x.Req.LeaderId;
 				}
 			
@@ -154,6 +159,7 @@ func (followerState* FollowerState) Run(raftNode *RaftNode) (NodeState, error) {
 						}
 						continue;
 					}
+					// To-do: error handling for other errors
 				}
 
 				// detected conflict in log
@@ -192,14 +198,15 @@ func (followerState* FollowerState) Run(raftNode *RaftNode) (NodeState, error) {
 					continue;
 				}
 				if(x.Req.Term > term){
-					raftNode.Store.setCurrentTerm(x.Req.Term);
-					raftNode.Store.setVotedFor(0);
+					raftNode.Store.SetCurrentTerm(x.Req.Term);
+					raftNode.Store.SetVotedFor(0);
 					leaderId = 0;
 				}
 
-				if(raftNode.Store.getVotedFor() == 0){
-					if((x.Req.LastLogTerm >= raftNode.Store.GetLastLogTerm()) && (x.Req.LastLogIndex >= raftNode.Store.GetLastLogIndex())){
-						raftNode.Store.setVotedFor(x.Req.CandidateId);
+				if(raftNode.Store.GetVotedFor() == 0){
+					if (x.Req.LastLogTerm > raftNode.Store.GetLastLogTerm()) || (x.Req.LastLogTerm == raftNode.Store.GetLastLogTerm() && x.Req.LastLogIndex >= raftNode.Store.GetLastLogIndex()){
+						resetTimer();
+						raftNode.Store.SetVotedFor(x.Req.CandidateId);
 						x.RespCh <- RequestVoteResponse{
 							Term: term,
 							VoteGranted: true,
@@ -245,7 +252,7 @@ func getEntriesToPatch(logEntries []LogEntry, prevLogIndex LogIndex, lastStoreLo
 
 	// in most of the cases, the log entries sent by leader are continous so check that case
 	if(lastStoreLogIndex == prevLogIndex){
-		return (logEntries, prevLogIndex+1);
+		return logEntries, prevLogIndex+1;
 	}
 
 	maxBSIndex := LogIndex(min(int(len(logEntries) + int(prevLogIndex)), int(lastStoreLogIndex)));
@@ -253,7 +260,7 @@ func getEntriesToPatch(logEntries []LogEntry, prevLogIndex LogIndex, lastStoreLo
 
 	for maxBSIndex >= minBSIndex {
 		midIndex := (maxBSIndex + minBSIndex) / 2;
-		midLogEntry, err := store.GetLogEntry(midIndex);
+		midLogTerm, err := store.GetLogTerm(midIndex);
 
 		var unmatched bool = false;
 
@@ -262,10 +269,9 @@ func getEntriesToPatch(logEntries []LogEntry, prevLogIndex LogIndex, lastStoreLo
 			if _, ok := err.(LogIndexOutOfBoundsError); ok {
 				unmatched = true;
 			}
-		}
-
-		// entry exists but there is a conflict
-		if midLogEntry.Term != logEntries[midIndex-(prevLogIndex+1)].Term {
+			// To-do: error handling for other errors
+		} else if (midLogTerm != logEntries[midIndex-(prevLogIndex+1)].Term) {
+			// entry exists but there is a conflict
 			unmatched = true;
 		}
 
@@ -277,5 +283,5 @@ func getEntriesToPatch(logEntries []LogEntry, prevLogIndex LogIndex, lastStoreLo
 		}
 	}
 	unmatchedIndex := minBSIndex;
-	return (logEntries[(unmatchedIndex-(prevLogIndex+1)):], unmatchedIndex);
+	return logEntries[(unmatchedIndex-(prevLogIndex+1)):], unmatchedIndex;
 }
