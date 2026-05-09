@@ -19,6 +19,28 @@ Design quality is non-negotiable. Shortcuts that compromise the learning experie
 - **Do not over-explain.** When the owner asks a focused question, give a focused answer. Long structural lectures are unwelcome unless explicitly requested.
 - **Push back on design decisions** when they would compromise learning or production quality. Be honest about trade-offs.
 - **Respect the owner's existing design** in `design/` (LLD, communication, persistence, deployment, testability). Refer to those rather than re-inventing.
+- **Time is the most valuable thing.** Default to high-signal, minimum-length responses. Elaborate only when explicitly asked.
+- **Don't bury novel ideas.** When the owner is exploring an unconventional approach, evaluate it on its merits before suggesting the conventional alternative. Don't reflexively redirect to "the standard pattern."
+
+### Code validation mode (`validate-code`)
+
+When the owner types **`validate-code`** (with or without an attached snippet), follow these rules strictly:
+
+- **High signal, minimum length.** No preambles, no recaps, no "great question." List flaws and stop.
+- **Categorize every flaw** with one of these tags:
+  - `[syntactical]` — won't compile / parse / run.
+  - `[critical-logical]` — compiles but is wrong (deadlock, race, off-by-one, contract violation).
+  - `[logical]` — works in the common case but breaks at edges.
+  - `[design]` — works correctly, but the structure could be better.
+- **For `[design]` flaws**, give the suggested design and the reason in **one line each**. Do not expand unless asked.
+- **Do not bury the owner's intent.** If they're trying something unconventional, evaluate whether it works for their stated goal before proposing the conventional pattern. If the unconventional approach is fine, say so and move on.
+- **Do not pre-emptively forecast future bugs.** Validate the code as it is, not as it might become when more goroutines / states / peers exist. If a forecast is genuinely important, mark it `[future]` and keep it to one line.
+- **No code rewrites unless asked.** Point at the line and the fix in words. The owner writes the code.
+- **Order flaws by severity**: syntactical → critical-logical → logical → design → future.
+- **Verify every flaw before raising it.** Trace through the code mentally and confirm the flaw actually manifests in the code as written. If you can't construct a concrete case where it triggers, do not raise it. Raising invalid flaws wastes the owner's time and erodes trust in the validation. When in doubt, leave it out.
+- **If the owner pushes back on a flaw, re-verify before defending.** Apply more tokens here and think deep here before if the pushback is correct, backdown. Else counter with the same rules as above.
+
+These rules apply only when `validate-code` is typed. Outside that mode, default behavior applies.
 
 ---
 
@@ -33,6 +55,13 @@ Design quality is non-negotiable. Shortcuts that compromise the learning experie
 - **Two storage implementations**: an in-memory `LogStore` first, a disk-backed one later. Both satisfy the same `LogStore` interface.
 - **Persistence is decoupled from Raft.** This is already in `README.md` and is enforced via the `LogStore` and `StateMachine` interfaces.
 - **NodeID-based addressing in the algorithm.** The algorithm only ever knows about `NodeID`s. Each transport implementation maintains its own peer address book (e.g., the gRPC transport has `map[NodeID]"host:port"`). Address resolution is a transport concern, not an algorithm concern.
+- **Reads and writes use a single unified path.** No separate `readRequestChannel`. Every client operation (Get, Put, Delete, CAS) goes through `writeRequestChannel`, gets appended to the log, replicated, committed, then executed on the state machine. This gives linearizable reads without a special read path. ReadIndex optimization is deferred.
+- **No `Handler` interface.** The inbound direction (transport → raft) is a direct method call on `RaftNode` or a channel push. Only the outbound `Transport` interface (raft → peers) needs an interface, because it has two implementations (inmem, gRPC).
+- **Logger is `*slog.Logger` injected via `Config`.** No custom logger interface. `slog` is standard library, structured, and the consumer controls the `Handler` (output destination). Logger field lives in `raft/config.go`.
+- **Single `Store` interface** for both log entries and persistent state (`term`, `votedFor`). No split into LogStore/StateStore. Store is dumb — all logic lives in the algorithm. Implementations live in `storage/`.
+- **Client dedup map lives on `RaftNode`** (in-memory). Rebuilt from the log on startup. Entries removed when corresponding log entries are deleted (truncation/compaction). No dedup in StateMachine.
+- **`LogEntry` has first-class `ClientId` and `SequenceNum` fields** so the leader can check dedup without decoding the opaque `Data` payload.
+- **Membership config is persisted in the log** as a special entry type. On startup, membership is rebuilt by replaying the log. In-memory `MembershipConfig` struct lives in `raft/membership.go`.
 
 ### Build sequence (decided)
 
@@ -79,20 +108,16 @@ Granularity inside `storage/` and `transport/` (single file vs subdirectory per 
   - `testability.md` — unit / integration / regression test layers, chaos harness design (failure injection via special log entry).
   - `low-leve-design.java` — detailed LLD covering state machine interface, log interface, storage, node states (Leader / Follower / Candidate), RPC services, channel-based concurrency model.
 - **Architectural commitments above are decided.**
+- **Build sequence step 1 (project scaffold)** — done. `go.mod`, `.gitignore`, directory tree, `cmd/raftd/main.go` stub, and `Makefile` all created. Go 1.26.2 installed via Homebrew. `make build` verified clean.
 
 ### What is in progress
 
-- **Build sequence step 1 (project scaffold)** — partially done:
-  - `go.mod` created with module path `github.com/komminy/raft`, Go 1.22.
-  - `.gitignore` created.
-  - Directory tree created per the target layout (`raft/`, `transport/{inmem,grpc}/`, `storage/{memory,disk}/`, `statemachine/`, `cmd/raftd/`, `proto/`, `gen/`, `test/`), each with a one-line `README.md` describing its purpose.
-  - `cmd/raftd/main.go` exists as an empty stub so `go build ./...` will succeed.
-  - **Not yet done:** `Makefile`. Go toolchain not yet on PATH for the owner — `go build` not yet verified.
+- **Build sequence step 2 (domain types)** — in progress. Owner is working on `raft/types.go` and `raft/interfaces.go`.
 
 ### What is not done
 
-- **Build sequence steps 2–10 are all pending**, in order.
-- **No algorithm code yet** — `raft/` is empty apart from its README. Domain types and interfaces (steps 2–3) are the owner's next task.
+- **Build sequence steps 3–10 are all pending**, in order.
+- **No algorithm code yet** — `raft/` is empty apart from its README. Domain types and interfaces (steps 2–3) are the owner's current task.
 
 ### Serious issues to address
 
