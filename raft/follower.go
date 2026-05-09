@@ -3,24 +3,37 @@ import (
 	"time";
 	"math/rand/v2";
 	"sync";
+	"sync/atomic"
 )
 
 type FollowerState struct {
 }
 
+func resetTimer(timer *time.Timer, heartbeatTimeout time.Duration){
+	if(!timer.Stop()){
+		// drain the expiry channel if already expired
+		select {
+		case <- timer.C:
+		default:
+		}
+	}
+	timer.Reset(heartbeatTimeout);
+}
+
+
 func (followerState* FollowerState) Run(raftNode *RaftNode) (NodeState, error) {
 	wg := sync.WaitGroup{};
-	wg.Add(6);
 	heartbeatTimeout := raftNode.Config.ElectionTimeoutMin + time.Duration(rand.IntN(int(raftNode.Config.ElectionTimeoutMax - raftNode.Config.ElectionTimeoutMin)));
 	timer := time.NewTimer(heartbeatTimeout);
 
 	localAppendEntriesRequestChannel := make(chan AppendEntriesEnvelope, 10);
 	leaderId := NodeId(0);
 	// channel to stop the go-routines
-	stopChan := make(chan struct{});
+	stopChan := make(chan struct{}, 10);
 
-	appendSuccessReqChannel := make(chan AppendEntriesRequest, 10);
+	resetTimerChannel := make (chan bool, 10);
 
+	wg.Add(1);
 	go func() {
 		defer wg.Done();
 		for {
@@ -28,7 +41,7 @@ func (followerState* FollowerState) Run(raftNode *RaftNode) (NodeState, error) {
 			case x := <- raftNode.ClientRequestCh:
 				x.RespCh <- ClientResponse{
 					Success: false,
-					LeaderId: leaderId,
+					LeaderId: NodeId(atomic.LoadUint64((*uint64)(&leaderId))),
 				}
 			case <- stopChan:
 				return;
@@ -36,44 +49,8 @@ func (followerState* FollowerState) Run(raftNode *RaftNode) (NodeState, error) {
 		}
 	}();
 
-	func resetTimer(){
-		if(!timer.Stop()){
-			// drain the expiry channel if already expired
-			select {
-			case <- timer.C:
-			default:
-			}
-		}
-		timer.Reset(heartbeatTimeout);
-	}
-
-	go func() {
-		defer wg.Done();
-		for {
-			select {
-			case x := <- raftNode.AppendEntriesCh:
-				resetTimer();
-				localAppendEntriesRequestChannel <- x;
-			case <- stopChan:
-				return;
-			}
-		}
-	}();
-
-	go func() {
-		defer wg.Done();
-		for {
-			select {
-			case <- timer.C:
-				// timer expired, shutdown the go-routines
-				close(stopChan);
-				return;
-			case <- stopChan:
-				return;
-			}
-		}
-	}();	
-
+	wg.Add(1);
+	// the ownership of timer is handled by this go-routine
 	go func() {
 		defer wg.Done();
 		for {
@@ -82,48 +59,22 @@ func (followerState* FollowerState) Run(raftNode *RaftNode) (NodeState, error) {
 				// shutdown signal received from top level
 				close(stopChan);
 				return;
+			case <- timer.C:
+				// timer expired, shutdown the go-routines
+				close(stopChan);
+				return;
+			case x := <- raftNode.AppendEntriesCh:
+				resetTimer(timer, heartbeatTimeout);
+				localAppendEntriesRequestChannel <- x;
+			case <- resetTimerChannel:
+				resetTimer(timer, heartbeatTimeout);
 			case <- stopChan:
 				return;
 			}
 		}
 	}();
 
-	go func() {
-		defer wg.Done();
-		for {
-			select {
-			case x := <- appendSuccessReqChannel:
-				lastStoreLogIndex := raftNode.Store.GetLastLogIndex();
-				// append entries
-				entriesToPatch, firstUnmatchedIndex := getEntriesToPatch(x.Entries, x.PrevLogIndex, lastStoreLogIndex, raftNode.Store);
-
-				lastEntriesIndex := firstUnmatchedIndex + LogIndex(len(entriesToPatch)) - 1;
-
-				// patch the local log and truncate if there is a conflict
-				if(len(x.Entries) > 0){
-					diskwg := sync.WaitGroup{};
-					diskwg.Add(1);
-					go func() {
-						defer diskwg.Done();
-						if((lastEntriesIndex < lastStoreLogIndex) && (firstUnmatchedIndex != lastEntriesIndex + 1)){
-							raftNode.Store.TruncateFrom(lastEntriesIndex + 1);
-						}
-					}();
-
-					raftNode.Store.PatchEntries(entriesToPatch);
-					
-					diskwg.Wait();
-				}
-
-				commitIndex := min(lastEntriesIndex, x.LeaderCommit);
-				raftNode.Store.SetLastCommittedIndex(commitIndex);
-				// maybe trigger a communication to the store saying that the commit index got updated
-			case <- stopChan:
-				return;
-			}
-		}
-	}();
-
+	wg.Add(1);
 	go func() {
 		defer wg.Done();
 		for {
@@ -137,11 +88,11 @@ func (followerState* FollowerState) Run(raftNode *RaftNode) (NodeState, error) {
 						Success: false,
 					}
 					continue;
-				} else if ((x.Req.Term > term) || (leaderId == 0)) {
+				} else if ((x.Req.Term > term) || (NodeId(atomic.LoadUint64((*uint64)(&leaderId))) == 0)) {
 					term = x.Req.Term;
 					raftNode.Store.SetCurrentTerm(x.Req.Term);
 					raftNode.Store.SetVotedFor(x.Req.LeaderId);
-					leaderId = x.Req.LeaderId;
+					atomic.StoreUint64((*uint64)(&leaderId), uint64(x.Req.LeaderId));
 				}
 			
 				log, err := raftNode.Store.GetLogEntry(x.Req.PrevLogIndex);
@@ -177,14 +128,37 @@ func (followerState* FollowerState) Run(raftNode *RaftNode) (NodeState, error) {
 					continue;
 				}
 
+				lastStoreLogIndex := raftNode.Store.GetLastLogIndex();
+				// append entries
+				entriesToPatch, firstUnmatchedIndex := getEntriesToPatch(x.Req.Entries, x.Req.PrevLogIndex, lastStoreLogIndex, raftNode.Store);
+
+				lastEntriesIndex := firstUnmatchedIndex + LogIndex(len(entriesToPatch)) - 1;
+
+				// patch the local log and truncate if there is a conflict
+				if(len(x.Req.Entries) > 0){
+					diskwg := sync.WaitGroup{};
+					diskwg.Add(1);
+					go func() {
+						defer diskwg.Done();
+						if((lastEntriesIndex < lastStoreLogIndex) && (firstUnmatchedIndex != lastEntriesIndex + 1)){
+							raftNode.Store.TruncateFrom(lastEntriesIndex + 1);
+						}
+					}();
+
+					raftNode.Store.PatchEntries(entriesToPatch);
+					
+					diskwg.Wait();
+				}
+
+				commitIndex := min(lastEntriesIndex, x.Req.LeaderCommit);
+				raftNode.Store.SetLastCommittedIndex(commitIndex);
+				// maybe trigger a communication to the store saying that the commit index got updated
+
 				// send the response to leader that the prevLogIndex and the prevLogTerm are valid and append asynchronously
 				x.RespCh <- AppendEntriesResponse{
 					Term: term,
 					Success: true,
 				}
-
-				appendSuccessReqChannel <- x.Req;
-
 
 			case x := <- raftNode.RequestVoteCh:
 
@@ -198,14 +172,15 @@ func (followerState* FollowerState) Run(raftNode *RaftNode) (NodeState, error) {
 					continue;
 				}
 				if(x.Req.Term > term){
+					term = x.Req.Term;
 					raftNode.Store.SetCurrentTerm(x.Req.Term);
 					raftNode.Store.SetVotedFor(0);
-					leaderId = 0;
+					atomic.StoreUint64((*uint64)(&leaderId), 0);
 				}
 
 				if(raftNode.Store.GetVotedFor() == 0){
 					if (x.Req.LastLogTerm > raftNode.Store.GetLastLogTerm()) || (x.Req.LastLogTerm == raftNode.Store.GetLastLogTerm() && x.Req.LastLogIndex >= raftNode.Store.GetLastLogIndex()){
-						resetTimer();
+						resetTimerChannel <- true;
 						raftNode.Store.SetVotedFor(x.Req.CandidateId);
 						x.RespCh <- RequestVoteResponse{
 							Term: term,
