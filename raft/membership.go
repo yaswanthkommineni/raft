@@ -16,7 +16,7 @@ func (membership* Membership) apply(logEntry* LogEntry) error{
 
 }
 
-func (membership* Membership) EachNode(callback func(nodeId NodeId, nodeAddress NodeAddress)) {
+func (membership* Membership) forEachNode(callback func(nodeId NodeId, nodeAddress NodeAddress)) {
 	for nodeId, nodeAddress := range membership.Members {
 		callback(nodeId, nodeAddress);
 	}

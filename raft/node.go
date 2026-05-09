@@ -1,6 +1,9 @@
 package raft;
 
-import "sync";
+import {
+	"sync",
+	"sync/atomic"
+};
 // This file contains the implementation of the Raft node.
 
 // The RaftNode struct represents a single node in the Raft cluster. It contains the state of the node, such as its current term, log entries, and other relevant information.
@@ -10,6 +13,7 @@ type RaftNode struct {
 	Transport Transport;
 	Membership Membership;
 
+	leaderId NodeId;
 	LastAppliedIndex LogIndex;
 	lastCommittedIndex LogIndex;
 
@@ -27,6 +31,14 @@ type RaftNode struct {
 	shutdownOnce sync.Once;
 
 	NodeState NodeState;
+}
+
+func (n* RaftNode) GetLeaderId() NodeId {
+	return NodeId(atomic.LoadUint64((*uint64)(&n.leaderId)));
+}
+
+func (n* RaftNode) SetLeaderId(leaderId NodeId) {
+	atomic.StoreUint64((*uint64)(&n.leaderId), uint64(leaderId));
 }
 
 // implement thread save concurrenctly callable getters and setters for the RaftNode's state, such as the last committed index. 

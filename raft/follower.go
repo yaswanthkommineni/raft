@@ -3,7 +3,6 @@ import (
 	"time";
 	"math/rand/v2";
 	"sync";
-	"sync/atomic"
 )
 
 type FollowerState struct {
@@ -27,7 +26,6 @@ func (followerState* FollowerState) Run(raftNode *RaftNode) (NodeState, error) {
 	timer := time.NewTimer(heartbeatTimeout);
 
 	localAppendEntriesRequestChannel := make(chan AppendEntriesEnvelope, 10);
-	leaderId := NodeId(0);
 	// channel to stop the go-routines
 	stopChan := make(chan struct{}, 10);
 
@@ -41,7 +39,7 @@ func (followerState* FollowerState) Run(raftNode *RaftNode) (NodeState, error) {
 			case x := <- raftNode.ClientRequestCh:
 				x.RespCh <- ClientResponse{
 					Success: false,
-					LeaderId: NodeId(atomic.LoadUint64((*uint64)(&leaderId))),
+					LeaderId: raftNode.GetLeaderId(),
 				}
 			case <- stopChan:
 				return;
@@ -88,11 +86,11 @@ func (followerState* FollowerState) Run(raftNode *RaftNode) (NodeState, error) {
 						Success: false,
 					}
 					continue;
-				} else if ((x.Req.Term > term) || (NodeId(atomic.LoadUint64((*uint64)(&leaderId))) == 0)) {
+				} else if ((x.Req.Term > term) || (raftNode.GetLeaderId() == 0)) {
 					term = x.Req.Term;
 					raftNode.Store.SetCurrentTerm(x.Req.Term);
 					raftNode.Store.SetVotedFor(x.Req.LeaderId);
-					atomic.StoreUint64((*uint64)(&leaderId), uint64(x.Req.LeaderId));
+					raftNode.SetLeaderId(x.Req.LeaderId);
 				}
 			
 				log, err := raftNode.Store.GetLogEntry(x.Req.PrevLogIndex);
@@ -175,7 +173,7 @@ func (followerState* FollowerState) Run(raftNode *RaftNode) (NodeState, error) {
 					term = x.Req.Term;
 					raftNode.Store.SetCurrentTerm(x.Req.Term);
 					raftNode.Store.SetVotedFor(0);
-					atomic.StoreUint64((*uint64)(&leaderId), 0);
+					raftNode.SetLeaderId(0);
 				}
 
 				if(raftNode.Store.GetVotedFor() == 0){
