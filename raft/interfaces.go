@@ -35,6 +35,18 @@ type StateMachine interface {
 	Apply (entry *LogEntry) (StateMachineResponseData, error);
 }
 
+// Transport abstracts the network layer. The algorithm only knows NodeIds;
+// each Transport implementation maintains its own address book (NodeId → address).
+// All methods must be safe for concurrent use.
+type Transport interface {
+	// SendAppendEntries sends an AppendEntries RPC to the given node.
+	// The context allows the caller to cancel in-flight RPCs (e.g., on shutdown or state transition).
+	SendAppendEntries(ctx context.Context, nodeAddress NodeAddress, req AppendEntriesRequest) (AppendEntriesResponse, error);
+
+	// SendRequestVote sends a RequestVote RPC to the given node.
+	SendRequestVote(ctx context.Context, nodeAddress NodeAddress, req RequestVoteRequest) (RequestVoteResponse, error);
+}
+
 type NodeState interface {
 	Run(raftNode *RaftNode) (NodeState, error);
 }

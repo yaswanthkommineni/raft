@@ -7,6 +7,7 @@ type Membership struct {
 	Members map[NodeId]NodeAddress{};
 	
 	// only one node can be added or removed at a time
+	// should be set to 0 if there are no changes in progress
 	ChangeNode NodeId;
 	IsNodeRemoval bool;
 }
