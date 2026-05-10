@@ -22,7 +22,7 @@ func resetTimer(timer *time.Timer, heartbeatTimeout time.Duration){
 
 func (followerState* FollowerState) Run(raftNode *RaftNode) (NodeState, error) {
 	wg := sync.WaitGroup{};
-	heartbeatTimeout := raftNode.Config.ElectionTimeoutMin + time.Duration(rand.IntN(int(raftNode.Config.ElectionTimeoutMax - raftNode.Config.ElectionTimeoutMin)));
+	heartbeatTimeout := RandomDuration(raftNode.Config.ElectionTimeoutMin, raftNode.Config.ElectionTimeoutMax);
 	timer := time.NewTimer(heartbeatTimeout);
 
 	localAppendEntriesRequestChannel := make(chan AppendEntriesEnvelope, 10);
@@ -211,7 +211,6 @@ func (followerState* FollowerState) Run(raftNode *RaftNode) (NodeState, error) {
 	}
 
 	// if we are here, then the go-routines are returned because of election timeout
-
 	return CandidateState{}, nil;
 
 }

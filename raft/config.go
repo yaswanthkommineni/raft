@@ -36,6 +36,7 @@ func DefaultConfig() Config {
         StoragePath:   "",       // in-memory for now
         ReferenceNode: Node{},       // bootstrap mode
         LogLevel:      "info",
+        RequestVoteTimeout: 150 * time.Millisecond,
     }
 }
 
