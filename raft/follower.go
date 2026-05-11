@@ -8,7 +8,7 @@ import (
 type FollowerState struct {
 }
 
-func resetTimer(timer *time.Timer, heartbeatTimeout time.Duration){
+func resetTimer(timer *time.Timer, heartbeatTimeout time.Duration) bool{
 	if(!timer.Stop()){
 		// drain the expiry channel if already expired
 		select {
@@ -16,7 +16,7 @@ func resetTimer(timer *time.Timer, heartbeatTimeout time.Duration){
 		default:
 		}
 	}
-	timer.Reset(heartbeatTimeout);
+	return timer.Reset(heartbeatTimeout);
 }
 
 
@@ -25,11 +25,9 @@ func (followerState* FollowerState) Run(raftNode *RaftNode) (NodeState, error) {
 	heartbeatTimeout := RandomDuration(raftNode.Config.ElectionTimeoutMin, raftNode.Config.ElectionTimeoutMax);
 	timer := time.NewTimer(heartbeatTimeout);
 
-	localAppendEntriesRequestChannel := make(chan AppendEntriesEnvelope, 10);
 	// channel to stop the go-routines
 	stopChan := make(chan struct{}, 10);
-
-	resetTimerChannel := make (chan bool, 10);
+	resetTimerChan := make(chan struct{}, 10);
 
 	wg.Add(1);
 	go func() {
@@ -53,6 +51,8 @@ func (followerState* FollowerState) Run(raftNode *RaftNode) (NodeState, error) {
 		defer wg.Done();
 		for {
 			select {
+			case <- resetTimerChan:
+				resetTimer(timer, heartbeatTimeout);
 			case <-raftNode.ShutdownCh:
 				// shutdown signal received from top level
 				close(stopChan);
@@ -61,11 +61,6 @@ func (followerState* FollowerState) Run(raftNode *RaftNode) (NodeState, error) {
 				// timer expired, shutdown the go-routines
 				close(stopChan);
 				return;
-			case x := <- raftNode.AppendEntriesCh:
-				resetTimer(timer, heartbeatTimeout);
-				localAppendEntriesRequestChannel <- x;
-			case <- resetTimerChannel:
-				resetTimer(timer, heartbeatTimeout);
 			case <- stopChan:
 				return;
 			}
@@ -77,7 +72,7 @@ func (followerState* FollowerState) Run(raftNode *RaftNode) (NodeState, error) {
 		defer wg.Done();
 		for {
 			select {
-			case x := <- localAppendEntriesRequestChannel:
+			case x := <- raftNode.AppendEntriesCh:
 				term := raftNode.Store.GetCurrentTerm();
 				// old leader check
 				if x.Req.Term < term {
@@ -86,10 +81,14 @@ func (followerState* FollowerState) Run(raftNode *RaftNode) (NodeState, error) {
 						Success: false,
 					}
 					continue;
-				} else if ((x.Req.Term > term) || (raftNode.GetLeaderId() == 0)) {
+				}
+				resetTimerChan <- struct{}{};
+				if ((x.Req.Term > term) || (raftNode.GetLeaderId() == 0)) {
+					if(x.Req.Term > term){
+						raftNode.Store.SetCurrentTerm(x.Req.Term);
+						raftNode.Store.SetVotedFor(0);
+					}
 					term = x.Req.Term;
-					raftNode.Store.SetCurrentTerm(x.Req.Term);
-					raftNode.Store.SetVotedFor(x.Req.LeaderId);
 					raftNode.SetLeaderId(x.Req.LeaderId);
 				}
 			
@@ -114,13 +113,12 @@ func (followerState* FollowerState) Run(raftNode *RaftNode) (NodeState, error) {
 				// detected conflict in log
 				if(log.Term != x.Req.PrevLogTerm){
 					// get the first log index of the conflicting term
-					firstLogIndex := raftNode.Store.GetFirstLogIndex(x.Req.PrevLogTerm);
 
 					x.RespCh <- AppendEntriesResponse{
 						Term: term,
 						Success: false,
-						ConflictIndex: firstLogIndex,
-						ConflictTerm: x.Req.PrevLogTerm,
+						ConflictIndex: raftNode.Store.GetFirstLogIndex(log.Term),
+						ConflictTerm: log.Term,
 					}
 
 					continue;
@@ -138,6 +136,8 @@ func (followerState* FollowerState) Run(raftNode *RaftNode) (NodeState, error) {
 					diskwg.Add(1);
 					go func() {
 						defer diskwg.Done();
+						// unmatched index doesn't mean that we need to truncate from there
+						// we have to check if the unmatched index is because of a conflict and not because the leader is thinking that the log is not upto date
 						if((lastEntriesIndex < lastStoreLogIndex) && (firstUnmatchedIndex != lastEntriesIndex + 1)){
 							raftNode.Store.TruncateFrom(lastEntriesIndex + 1);
 						}
@@ -149,7 +149,7 @@ func (followerState* FollowerState) Run(raftNode *RaftNode) (NodeState, error) {
 				}
 
 				commitIndex := min(lastEntriesIndex, x.Req.LeaderCommit);
-				raftNode.Store.SetLastCommittedIndex(commitIndex);
+				raftNode.SetLastCommittedIndex(commitIndex);
 				// maybe trigger a communication to the store saying that the commit index got updated
 
 				// send the response to leader that the prevLogIndex and the prevLogTerm are valid and append asynchronously
@@ -178,12 +178,13 @@ func (followerState* FollowerState) Run(raftNode *RaftNode) (NodeState, error) {
 
 				if(raftNode.Store.GetVotedFor() == 0){
 					if (x.Req.LastLogTerm > raftNode.Store.GetLastLogTerm()) || (x.Req.LastLogTerm == raftNode.Store.GetLastLogTerm() && x.Req.LastLogIndex >= raftNode.Store.GetLastLogIndex()){
-						resetTimerChannel <- true;
+						resetTimerChan <- struct{}{};
 						raftNode.Store.SetVotedFor(x.Req.CandidateId);
 						x.RespCh <- RequestVoteResponse{
 							Term: term,
 							VoteGranted: true,
 						}
+						// If the vote was granted after the timer expired, then no issues, this will initiate the elections and the term will be set as currentTerm + 1
 						continue;
 					}
 				}
@@ -205,13 +206,13 @@ func (followerState* FollowerState) Run(raftNode *RaftNode) (NodeState, error) {
 	select {
 	case _, ok := <- raftNode.ShutdownCh:
 		if(!ok){
-			return AbortState{}, nil;
+			return &AbortState{}, nil;
 		}
 	default:
 	}
 
 	// if we are here, then the go-routines are returned because of election timeout
-	return CandidateState{}, nil;
+	return &CandidateState{}, nil;
 
 }
 
