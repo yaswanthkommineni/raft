@@ -8,19 +8,22 @@ import (
 
 type CandidateState struct {
 	// the number of votes can be fit into 32 bit integer
-	newClusterVotesReceived, oldClusterVotesReceived atomic.Uint32;
+	newClusterVotesReceived, oldClusterVotesReceived uint32;
 	newClusterSize, oldClusterSize uint32;
-	declareWin chan NodeId;
+	// carries the resolved leader for this election: candidate's own id on a win,
+	// 0 on a step-down (higher term observed), or the leader id on AppendEntries from a valid leader
+	electionResultCh chan struct{winnerId NodeId; winnerTerm Term};
+	electionTerm Term;
 }
 
 func (candidateState *CandidateState) Run(raftNode *RaftNode) (NodeState, error) {
 
 	raftNode.SetLeaderId(0);
-	raftNode.Store.SetVotedFor(raftNode.Config.NodeId);
 	raftNode.Store.SetCurrentTerm(raftNode.Store.GetCurrentTerm() + 1);
+	raftNode.Store.SetVotedFor(raftNode.Config.NodeId);
 
-	candidateState.declareWin = make(chan NodeId, MaxClusterSize + 1);
-
+	candidateState.electionResultCh = make(chan struct{winnerId NodeId; winnerTerm Term}, MaxClusterSize + 1);
+	candidateState.electionTerm = raftNode.Store.GetCurrentTerm();
 	candidateState.oldClusterSize = uint32(len(raftNode.Membership.Members));
 	candidateState.newClusterSize = uint32(len(raftNode.Membership.Members));
 
@@ -35,11 +38,10 @@ func (candidateState *CandidateState) Run(raftNode *RaftNode) (NodeState, error)
 	candidateState.incrementAndCheckVotes(raftNode, raftNode.Config.NodeId);
 
 	electionTimeout := RandomDuration(raftNode.Config.ElectionTimeoutMin, raftNode.Config.ElectionTimeoutMax);
-	cadidateContext, cancelCandidateContext := context.WithTimeout(context.Background(), electionTimeout);
+	candidateContext, cancelCandidateContext := context.WithTimeout(context.Background(), electionTimeout);
 	defer cancelCandidateContext();
 
 	// start go-routines to request votes from other nodes
-
 	raftNode.Membership.forEachNode(func(nodeId NodeId, nodeAddress NodeAddress) {
 		if nodeId == raftNode.Config.NodeId {
 			return;
@@ -52,9 +54,11 @@ func (candidateState *CandidateState) Run(raftNode *RaftNode) (NodeState, error)
 				cancelVoteRequestContext();
 				wg.Done();
 			}();
+			// TODO: bound this retry loop with a max-attempt count or exponential backoff;
+			// today it spins until candidateContext expires.
 			for {
-				voteResponse, err := requestVote(voteRequestContext, nodeId, raftNode);
-				
+				voteResponse, err := requestVote(voteRequestContext, nodeId, raftNode, candidateState.electionTerm);
+
 				if err != nil {
 					select {
 					case <- candidateContext.Done():
@@ -70,10 +74,8 @@ func (candidateState *CandidateState) Run(raftNode *RaftNode) (NodeState, error)
 				if voteResponse.VoteGranted {
 					candidateState.incrementAndCheckVotes(raftNode, nodeId);
 				} else {
-					if voteResponse.Term > raftNode.Store.GetCurrentTerm() {
-						raftNode.Store.SetCurrentTerm(voteResponse.Term);
-						raftNode.Store.SetVotedFor(0);
-						candidateState.declareWin <- 0;
+					if voteResponse.Term > candidateState.electionTerm {
+						candidateState.electionResultCh <- struct{winnerId: 0; winnerTerm: voteResponse.Term};
 					}
 				}
 				return;
@@ -84,75 +86,74 @@ func (candidateState *CandidateState) Run(raftNode *RaftNode) (NodeState, error)
 
 	var nextState NodeState;
 
-	breakLoop := false;
-
-	for !breakLoop {
+loop:
+	for {
 		select {
-		case winnerId := <- candidateState.declareWin:
+		case result := <- candidateState.electionResultCh:
 			cancelCandidateContext();
-			raftNode.SetLeaderId(winnerId);
-			if winnerId == raftNode.Config.NodeId {
-				nextState = LeaderState{};
-			} else {
-				nextState = FollowerState{};
+			raftNode.SetLeaderId(result.winnerId);
+			if(result.winnerTerm > candidateState.electionTerm){
+				raftNode.Store.SetCurrentTerm(result.winnerTerm);
+				raftNode.Store.SetVotedFor(0);
 			}
-			breakLoop = true;
+			if result.winnerId == raftNode.Config.NodeId {
+				nextState = &LeaderState{};
+			} else {
+				nextState = &FollowerState{};
+			}
+			break loop;
 		case <- raftNode.ShutdownCh:
 			cancelCandidateContext();
-			nextState = AbortState{};
-			breakLoop = true;
+			nextState = &AbortState{};
+			break loop;
+		// higher term observed, exit
 		case req := <- raftNode.RequestVoteCh:
-			if req.Req.Term > raftNode.Store.GetCurrentTerm() {
-				cancelCandidateContext();
-				raftNode.Store.SetCurrentTerm(req.Req.Term);
-				raftNode.Store.SetVotedFor(0);
-				candidateState.declareWin <- 0;
+			if req.Req.Term > candidateState.electionTerm {
+				candidateState.electionResultCh <- struct{winnerId: 0; winnerTerm: req.Req.Term};
+				// TODO: spawning a goroutine to re-enqueue leaks if the next state never reads RequestVoteCh
+				// (e.g. AbortState). Replace with a buffered handoff slot on RaftNode that the next state drains first.
 				// the next state will decide to grant or reject the vote based on the log comparision
 				go func() {
 					// to avoid deadlock
 					raftNode.RequestVoteCh <- req;
 				}();
-				breakLoop = true;
 				continue;
 			}
 			// we are free to reject the vote request
 			req.RespCh <- RequestVoteResponse{
-				Term: raftNode.Store.GetCurrentTerm(),
+				Term: candidateState.electionTerm,
 				VoteGranted: false,
 			}
+		// new leader observed, exit
 		case req := <- raftNode.AppendEntriesCh:
-			if req.Req.Term >= raftNode.Store.GetCurrentTerm() {
-				cancelCandidateContext();
-				if req.Req.Term > raftNode.Store.GetCurrentTerm() {
-					raftNode.Store.SetCurrentTerm(req.Req.Term);
-					raftNode.Store.SetVotedFor(0);
-				}
-				candidateState.declareWin <- req.Req.LeaderId;
+			if req.Req.Term >= candidateState.electionTerm {
+				candidateState.electionResultCh <- struct{winnerId: req.Req.LeaderId; winnerTerm: req.Req.Term};
+				// TODO: spawning a goroutine to re-enqueue leaks if the next state never reads AppendEntriesCh.
+				// Replace with a buffered handoff slot on RaftNode that the next state drains first.
 				// the next state will handle the AppendEntries request
 				go func() {
 					// to avoid deadlock
 					raftNode.AppendEntriesCh <- req;
 				}();
-				breakLoop = true;
+				// don't break the loog, the one who processes the electionResultCh will break it
 				continue;
 			}
 			// we are free to reject the AppendEntries request
 			req.RespCh <- AppendEntriesResponse{
-				Term: raftNode.Store.GetCurrentTerm(),
+				Term: candidateState.electionTerm,
 				Success: false,
 			}
-		case <- cadidateContext.Done():
+		case <- candidateContext.Done():
 			// election timeout, start new election
-			if cadidateContext.Err() != context.DeadlineExceeded {
+			if candidateContext.Err() != context.DeadlineExceeded {
 				// to-do: log the error
-				nextState = AbortState{};
-				breakLoop = true;
-				continue;
+				nextState = &AbortState{};
+				break loop;
 			}
 			raftNode.Store.SetVotedFor(0);
 			raftNode.SetLeaderId(0);
-			nextState = CandidateState{};
-			breakLoop = true;
+			nextState = &CandidateState{};
+			break loop;
 		}
 	}
 
@@ -174,7 +175,7 @@ func (candidateState *CandidateState) incrementAndCheckVotes(raftNode *RaftNode,
 		atomic.AddUint32(&candidateState.newClusterVotesReceived, 1);
 	}
 	if checkMajority(candidateState.oldClusterSize, atomic.LoadUint32(&candidateState.oldClusterVotesReceived)) && checkMajority(candidateState.newClusterSize, atomic.LoadUint32(&candidateState.newClusterVotesReceived)) {
-		candidateState.declareWin <- raftNode.Config.NodeId;
+		candidateState.electionResultCh <- struct{winnerId: raftNode.Config.NodeId; winnerTerm: candidateState.electionTerm};
 	}
 }
 
@@ -182,9 +183,9 @@ func checkMajority(totalNodes uint32, votesReceived uint32) bool {
 	return votesReceived > (totalNodes/2);
 }
 
-func requestVote(ctx context.Context, followerId NodeId, raftNode *RaftNode) (RequestVoteResponse, error) {
-	return raftNode.Transport.SendRequestVote(ctx, raftNode.Membership[followerId], RequestVoteRequest{
-		Term : raftNode.Store.GetCurrentTerm(),
+func requestVote(ctx context.Context, followerId NodeId, raftNode *RaftNode, electionTerm Term) (RequestVoteResponse, error) {
+	return raftNode.Transport.SendRequestVote(ctx, raftNode.Membership.Members[followerId], RequestVoteRequest{
+		Term : electionTerm,
 		CandidateId : raftNode.Config.NodeId,
 		LastLogIndex : raftNode.Store.GetLastLogIndex(),
 		LastLogTerm : raftNode.Store.GetLastLogTerm(),
