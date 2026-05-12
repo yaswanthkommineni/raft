@@ -33,14 +33,10 @@ func (candidateState *CandidateState) Run(raftNode *RaftNode) (NodeState, error)
 	raftNode.SetLeaderId(0);
 	newTerm := raftNode.Store.GetCurrentTerm() + 1;
 	if err := raftNode.Store.SetCurrentTerm(newTerm); err != nil {
-		logger.Error("store write failed; continuing", "op", "SetCurrentTerm", "term", newTerm, "error", err);
-		// not safe to continue, return to candidate state again
 		return &CandidateState{}, err;
 	}
 	if err := raftNode.Store.SetVotedFor(raftNode.Config.NodeId); err != nil {
-		logger.Error("store write failed; continuing", "op", "SetVotedFor", "voted_for", raftNode.Config.NodeId, "error", err);
-		// not safe to continue, if we move to candidate state again, this can potentially lead to this node continously incrementing the term
-		// being unable to change the votedFor is a fatal error
+		// fatal: term incremented but votedFor not self — Raft invariant violation
 		return &AbortState{}, err;
 	}
 
@@ -49,10 +45,12 @@ func (candidateState *CandidateState) Run(raftNode *RaftNode) (NodeState, error)
 	candidateState.oldClusterSize = uint32(len(raftNode.Membership.Members));
 	candidateState.newClusterSize = uint32(len(raftNode.Membership.Members));
 
-	if raftNode.Membership.IsNodeRemoval {
-		candidateState.newClusterSize -= 1;
-	} else {
-		candidateState.oldClusterSize -= 1;
+	if raftNode.Membership.ChangeNode != 0{
+		if raftNode.Membership.IsNodeRemoval {
+			candidateState.newClusterSize -= 1;
+		} else {
+			candidateState.oldClusterSize -= 1;
+		}
 	}
 
 	logger = logger.With("term", candidateState.electionTerm);
@@ -65,12 +63,10 @@ func (candidateState *CandidateState) Run(raftNode *RaftNode) (NodeState, error)
 	// to peers carries these same values, so there's no point re-reading per goroutine.
 	lastLogIndex, err := raftNode.Store.GetLastLogIndex();
 	if err != nil {
-		logger.Error("store read failed; aborting election", "op", "GetLastLogIndex", "error", err);
 		return &AbortState{}, err;
 	}
 	lastLogTerm, err := raftNode.Store.GetLastLogTerm();
 	if err != nil {
-		logger.Error("store read failed; aborting election", "op", "GetLastLogTerm", "error", err);
 		return &AbortState{}, err;
 	}
 	voteRequest := RequestVoteRequest{
@@ -135,13 +131,11 @@ loop:
 			raftNode.SetLeaderId(result.winnerId);
 			if result.winnerTerm > candidateState.electionTerm {
 				if err := raftNode.Store.SetCurrentTerm(result.winnerTerm); err != nil {
-					logger.Error("store write failed; continuing", "op", "SetCurrentTerm", "term", result.winnerTerm, "error", err);
 					nextState = &AbortState{};
 					errReturned = err;
 					break loop;
 				}
 				if err := raftNode.Store.SetVotedFor(0); err != nil {
-					logger.Error("store write failed; continuing", "op", "SetVotedFor", "error", err);
 					nextState = &AbortState{};
 					errReturned = err;
 					break loop;
@@ -170,8 +164,6 @@ loop:
 				logger.Info("higher-term RequestVote during election; stepping down",
 					"peer_id", req.Req.CandidateId, "peer_term", req.Req.Term);
 				candidateState.electionResultCh <- electionResult{winnerId: 0, winnerTerm: req.Req.Term};
-				// TODO: spawning a goroutine to re-enqueue leaks if the next state never reads RequestVoteCh
-				// (e.g. AbortState). Replace with a buffered handoff slot on RaftNode that the next state drains first.
 				go func() {
 					raftNode.RequestVoteCh <- req;
 				}();
@@ -189,7 +181,6 @@ loop:
 				logger.Info("leader observed during election; stepping down",
 					"leader_id", req.Req.LeaderId, "leader_term", req.Req.Term);
 				candidateState.electionResultCh <- electionResult{winnerId: req.Req.LeaderId, winnerTerm: req.Req.Term};
-				// TODO: see RequestVoteCh re-enqueue note above.
 				go func() {
 					raftNode.AppendEntriesCh <- req;
 				}();
@@ -210,10 +201,6 @@ loop:
 				break loop;
 			}
 			logger.Info("election timed out; starting a new one");
-			if err := raftNode.Store.SetVotedFor(0); err != nil {
-				logger.Error("store write failed; continuing", "op", "SetVotedFor", "error", err);
-				// no need to exit here, because the setVotedFor will be called again in the next election
-			}
 			raftNode.SetLeaderId(0);
 			nextState = &CandidateState{};
 			break loop;

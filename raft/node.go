@@ -8,6 +8,8 @@ import {
 
 // The RaftNode struct represents a single node in the Raft cluster. It contains the state of the node, such as its current term, log entries, and other relevant information.
 type RaftNode struct {
+	Config Config;
+
 	StateMachine StateMachine;
 	Store Store;
 	Transport Transport;
@@ -31,6 +33,10 @@ type RaftNode struct {
 	shutdownOnce sync.Once;
 
 	NodeState NodeState;
+
+	// storeBreaker is the Store wrapper that tracks consecutive write failures.
+	// nil when Config.StoreErrorThreshold == 0 (breaker disabled).
+	storeBreaker *CircuitBreakerStore;
 }
 
 func (n* RaftNode) GetLeaderId() NodeId {
@@ -49,7 +55,23 @@ func (n* RaftNode) SetLastCommittedIndex() LogIndex {
 }
 
 func (n* RaftNode) Boot() error {
-	// sets the NodeState
+	// Wrap the user-provided Store with the circuit breaker (or reset the
+	// existing wrapper for a re-boot). Every Boot gives the node a fresh
+	// counter and an un-tripped breaker.
+	if n.Config.StoreErrorThreshold > 0 {
+		if existing, ok := n.Store.(*CircuitBreakerStore); ok {
+			existing.Reset();
+			n.storeBreaker = existing;
+		} else {
+			wrapper := NewCircuitBreakerStore(n.Store, n.Config.StoreErrorThreshold, n.Config.Logger.With("node_id", n.Config.NodeId));
+			n.Store = wrapper;
+			n.storeBreaker = wrapper;
+		}
+	} else {
+		n.storeBreaker = nil;
+	}
+	// TODO: set the NodeState (initial state on cluster join / bootstrap)
+	return nil;
 }
 
 // HandleAppendEntries is called by the transport when an AppendEntries RPC arrives.
@@ -94,6 +116,16 @@ func (n* RaftNode) Run() error {
 					return;
 				default:
 			}
+			// Circuit breaker check happens between state transitions: if the
+			// Store has accumulated too many consecutive write failures, force
+			// abort regardless of what the state returned.
+			if n.storeBreaker != nil && n.storeBreaker.Tripped() {
+				n.Config.Logger.Error("store circuit breaker tripped; aborting node");
+				n.exitErr = err;
+				n.wg.Done();
+				n.Shutdown();
+				return;
+			}
 			if _, abort := nextState.(*AbortState); abort {
 				// Abort is the only fatal signal. err is carried out via exitErr
 				// for the caller (Shutdown) to inspect; states that return a
@@ -103,6 +135,9 @@ func (n* RaftNode) Run() error {
 				n.wg.Done();
 				n.Shutdown();
 				return;
+			}
+			if err != nil {
+				n.Config.Logger.Error("Last state returned an error:", err, "continuing with next state");
 			}
 			n.NodeState = nextState;
 		}

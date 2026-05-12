@@ -5,6 +5,7 @@ package raft;
 // The Store interface defines the methods that a storage backend must implement to be used by the Raft node. This allows for flexibility in choosing different storage implementations, such as in-memory or disk-based storage.
 // The store is dumb the ones who are using this should deal with the logic
 // The implementation of this should be thread safe and atomic => either an operation succeeds or fails, but it should not leave the store in an inconsistent state. This is important for the correctness of the Raft algorithm, as it relies on the consistency of the log and the state of the node.
+// Store should have a dummy log entry at index 0 with term 0 and log index 0
 type Store interface {
 	// State persistence - term and votedFor
 

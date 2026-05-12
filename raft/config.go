@@ -29,6 +29,12 @@ type Config struct {
     // Logger is the structured logger used by the raft package. If nil, slog.Default() is used.
     // Callers control destination/format by wiring the slog.Handler of their choice.
     Logger *slog.Logger
+
+    // StoreErrorThreshold is the maximum number of consecutive Store *write* failures
+    // tolerated before the breaker trips and the node escalates to AbortState.
+    // Read failures are logged by the wrapper but never trip the breaker. A successful
+    // write resets the counter. Set to 0 to disable the breaker (Store passes through unwrapped).
+    StoreErrorThreshold uint32
 }
 
 func DefaultConfig() Config {
@@ -44,8 +50,8 @@ func DefaultConfig() Config {
         StoragePath:   "",       // in-memory for now
         ReferenceNode: Node{},       // bootstrap mode
         LogLevel:      "info",
-        RequestVoteTimeout: 150 * time.Millisecond,
         Logger:        slog.Default(),
+        StoreErrorThreshold: 10,
     }
 }
 

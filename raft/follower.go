@@ -107,24 +107,29 @@ func (followerState *FollowerState) Run(raftNode *RaftNode) (NodeState, error) {
 					}
 					continue;
 				}
-				resetTimerChan <- struct{}{};
+				select{
+				case resetTimerChan <- struct{}{}:
+				default:
+				}
 				if (x.Req.Term > term) || (raftNode.GetLeaderId() == 0) {
 					if x.Req.Term > term {
 						peerLogger.Info("observed higher term; adopting leader");
 						if err := raftNode.Store.SetCurrentTerm(x.Req.Term); err != nil {
-							peerLogger.Error("store write failed; continuing", "op", "SetCurrentTerm", "term", x.Req.Term, "error", err);
 							x.RespCh <- AppendEntriesResponse{
 								Term:    term,
 								Success: false,
 							}
-							// not fatal error, ignore the request and continue
 							continue;
 						}
 						if err := raftNode.Store.SetVotedFor(0); err != nil {
-							peerLogger.Error("store write failed; continuing", "op", "SetVotedFor", "error", err);
-							// fatal error, the term got incremented but the votedFor is not set to 0
+							// fatal: term incremented but votedFor not cleared — invariant violation
+							x.RespCh <- AppendEntriesResponse{
+								Term:    term,
+								Success: false,
+							}
 							nextState = &AbortState{};
 							errReturned = err;
+							close(stopChan);
 							break loop;
 						}
 					} else {
@@ -140,8 +145,7 @@ func (followerState *FollowerState) Run(raftNode *RaftNode) (NodeState, error) {
 						lastLogIndex, idxErr := raftNode.Store.GetLastLogIndex();
 						lastLogTerm, termErr := raftNode.Store.GetLastLogTerm();
 						if idxErr != nil || termErr != nil {
-							peerLogger.Error("store read failed; rejecting AppendEntries without conflict hint",
-								"op", "GetLastLogIndex/Term", "index_error", idxErr, "term_error", termErr);
+							// wrapper logged the read errors; reject without conflict hint
 							x.RespCh <- AppendEntriesResponse{
 								Term:    term,
 								Success: false,
@@ -158,10 +162,7 @@ func (followerState *FollowerState) Run(raftNode *RaftNode) (NodeState, error) {
 						}
 						continue;
 					}
-					// not a fatal error, ignore the request and continue
-					// Unknown store error — log and reject this RPC; do not panic on log.Term below.
-					peerLogger.Error("store read failed; rejecting AppendEntries",
-						"op", "GetLogEntry", "index", x.Req.PrevLogIndex, "error", err);
+					// Unknown store error — wrapper logged it; reject this RPC (avoids panic on log.Term below).
 					x.RespCh <- AppendEntriesResponse{
 						Term:    term,
 						Success: false,
@@ -173,8 +174,6 @@ func (followerState *FollowerState) Run(raftNode *RaftNode) (NodeState, error) {
 				if log.Term != x.Req.PrevLogTerm {
 					conflictIndex, err := raftNode.Store.GetFirstLogIndex(log.Term);
 					if err != nil {
-						peerLogger.Error("store read failed; rejecting AppendEntries without conflict hint",
-							"op", "GetFirstLogIndex", "term", log.Term, "error", err);
 						x.RespCh <- AppendEntriesResponse{
 							Term:    term,
 							Success: false,
@@ -195,34 +194,27 @@ func (followerState *FollowerState) Run(raftNode *RaftNode) (NodeState, error) {
 
 				lastStoreLogIndex, err := raftNode.Store.GetLastLogIndex();
 				if err != nil {
-					peerLogger.Error("store read failed; rejecting AppendEntries",
-						"op", "GetLastLogIndex", "error", err);
 					x.RespCh <- AppendEntriesResponse{
 						Term:    term,
 						Success: false,
 					}
 					continue;
 				}
-				entriesToPatch, firstUnmatchedIndex := getEntriesToPatch(x.Req.Entries, x.Req.PrevLogIndex, lastStoreLogIndex, raftNode.Store, peerLogger);
+				entriesToPatch, firstUnmatchedIndex := getEntriesToPatch(x.Req.Entries, x.Req.PrevLogIndex, lastStoreLogIndex, raftNode.Store);
 				lastEntriesIndex := firstUnmatchedIndex + LogIndex(len(entriesToPatch)) - 1;
 
 				if len(x.Req.Entries) > 0 {
 					// Truncate (if there's a conflicting tail) then patch. Sequential is fine on a single disk
 					// and gives a clean crash-recovery story.
 					if (lastEntriesIndex < lastStoreLogIndex) && (firstUnmatchedIndex != lastEntriesIndex + 1) {
-						if err := raftNode.Store.TruncateFrom(lastEntriesIndex + 1); err != nil {
-							peerLogger.Error("store write failed; continuing", "op", "TruncateFrom", "from", lastEntriesIndex+1, "error", err);
-						}
+						// truncate error logged by wrapper; fall through and attempt the patch anyway
+						_ = raftNode.Store.TruncateFrom(lastEntriesIndex + 1);
 					}
 					if err := raftNode.Store.PatchEntries(entriesToPatch); err != nil {
-						peerLogger.Error("store write failed; rejecting AppendEntries",
-							"op", "PatchEntries", "first_unmatched_index", firstUnmatchedIndex,
-							"num_entries", len(entriesToPatch), "error", err);
 						x.RespCh <- AppendEntriesResponse{
 							Term:    term,
 							Success: false,
 						}
-						// not a fatal error
 						continue;
 					}
 				}
@@ -258,8 +250,6 @@ func (followerState *FollowerState) Run(raftNode *RaftNode) (NodeState, error) {
 				if x.Req.Term > term {
 					voteLogger.Info("observed higher term in RequestVote; clearing votedFor");
 					if err := raftNode.Store.SetCurrentTerm(x.Req.Term); err != nil {
-						voteLogger.Error("store write failed; rejecting vote",
-							"op", "SetCurrentTerm", "term", x.Req.Term, "error", err);
 						// not fatal: term not advanced in store, reject and continue
 						x.RespCh <- RequestVoteResponse{
 							Term:        term,
@@ -268,11 +258,14 @@ func (followerState *FollowerState) Run(raftNode *RaftNode) (NodeState, error) {
 						continue;
 					}
 					if err := raftNode.Store.SetVotedFor(0); err != nil {
-						voteLogger.Error("store write failed; aborting",
-							"op", "SetVotedFor", "error", err);
-						// fatal: term got incremented but votedFor not cleared — invariant violation
+						// fatal: term incremented but votedFor not cleared — invariant violation
+						x.RespCh <- RequestVoteResponse{
+							Term:        term,
+							VoteGranted: false,
+						}
 						nextState = &AbortState{};
 						errReturned = err;
+						close(stopChan);
 						break loop;
 					}
 					term = x.Req.Term;
@@ -284,8 +277,6 @@ func (followerState *FollowerState) Run(raftNode *RaftNode) (NodeState, error) {
 					lastLogTerm, termErr := raftNode.Store.GetLastLogTerm();
 					lastLogIndex, idxErr := raftNode.Store.GetLastLogIndex();
 					if termErr != nil || idxErr != nil {
-						voteLogger.Error("store read failed; cannot compare logs, rejecting vote",
-							"op", "GetLastLogIndex/Term", "index_error", idxErr, "term_error", termErr);
 						x.RespCh <- RequestVoteResponse{
 							Term:        term,
 							VoteGranted: false,
@@ -296,15 +287,16 @@ func (followerState *FollowerState) Run(raftNode *RaftNode) (NodeState, error) {
 						(x.Req.LastLogTerm == lastLogTerm && x.Req.LastLogIndex >= lastLogIndex);
 					if logUpToDate {
 						if err := raftNode.Store.SetVotedFor(x.Req.CandidateId); err != nil {
-							voteLogger.Error("store write failed; rejecting vote",
-								"op", "SetVotedFor", "candidate_id", x.Req.CandidateId, "error", err);
 							x.RespCh <- RequestVoteResponse{
 								Term:        term,
 								VoteGranted: false,
 							}
 							continue;
 						}
-						resetTimerChan <- struct{}{};
+						select {
+						case resetTimerChan <- struct{}{}:
+						default:
+						}
 						voteLogger.Info("vote granted");
 						x.RespCh <- RequestVoteResponse{
 							Term:        term,
@@ -354,7 +346,7 @@ func (followerState *FollowerState) Run(raftNode *RaftNode) (NodeState, error) {
 
 // implement this using binary search
 // returns the entries to patch along with the index of the first unmatched entry
-func getEntriesToPatch(logEntries []LogEntry, prevLogIndex LogIndex, lastStoreLogIndex LogIndex, store Store, logger *slog.Logger) ([]LogEntry, LogIndex) {
+func getEntriesToPatch(logEntries []LogEntry, prevLogIndex LogIndex, lastStoreLogIndex LogIndex, store Store) ([]LogEntry, LogIndex) {
 	if len(logEntries) == 0 {
 		return nil, prevLogIndex + 1;
 	}
@@ -374,14 +366,7 @@ func getEntriesToPatch(logEntries []LogEntry, prevLogIndex LogIndex, lastStoreLo
 		unmatched := false;
 
 		if err != nil {
-			if _, ok := err.(LogIndexOutOfBoundsError); ok {
-				unmatched = true;
-			} else {
-				// Unknown store error — treat conservatively as unmatched so we re-fetch this range.
-				logger.Error("store read failed; treating as unmatched",
-					"op", "GetLogTerm", "index", midIndex, "error", err);
-				unmatched = true;
-			}
+			unmatched = true;
 		} else if midLogTerm != logEntries[midIndex-(prevLogIndex+1)].Term {
 			unmatched = true;
 		}
