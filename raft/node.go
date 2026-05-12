@@ -23,7 +23,7 @@ type RaftNode struct {
 	ClientRequestCh chan ClientRequestEnvelope;
 
 	wg sync.WaitGroup;
-	
+
 	exitErr error;
 
 	// no data gets passed on this channel
@@ -94,7 +94,11 @@ func (n* RaftNode) Run() error {
 					return;
 				default:
 			}
-			if _, abort := nextState.(*AbortState);  (abort || err != nil) {
+			if _, abort := nextState.(*AbortState); abort {
+				// Abort is the only fatal signal. err is carried out via exitErr
+				// for the caller (Shutdown) to inspect; states that return a
+				// non-nil err with a non-Abort next state must already have
+				// logged the error themselves.
 				n.exitErr = err;
 				n.wg.Done();
 				n.Shutdown();

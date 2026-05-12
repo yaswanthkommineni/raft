@@ -1,5 +1,9 @@
 package raft
-import "time"
+import (
+	"errors"
+	"log/slog"
+	"time"
+)
 // Config holds all static configuration for a Raft node.
 // Section 1: algorithm tuning. Section 2: node identity and wiring.
 //
@@ -21,6 +25,10 @@ type Config struct {
     StoragePath  string         // where the disk LogStore writes (empty = in-memory only)
     ReferenceNode Node   // empty = bootstrap mode; non-empty = join an existing cluster via this node
     LogLevel     string
+
+    // Logger is the structured logger used by the raft package. If nil, slog.Default() is used.
+    // Callers control destination/format by wiring the slog.Handler of their choice.
+    Logger *slog.Logger
 }
 
 func DefaultConfig() Config {
@@ -37,6 +45,7 @@ func DefaultConfig() Config {
         ReferenceNode: Node{},       // bootstrap mode
         LogLevel:      "info",
         RequestVoteTimeout: 150 * time.Millisecond,
+        Logger:        slog.Default(),
     }
 }
 

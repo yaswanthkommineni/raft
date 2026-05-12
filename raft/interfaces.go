@@ -23,9 +23,9 @@ type Store interface {
 	GetLogEntry(index LogIndex) (*LogEntry, error);
 	GetLogTerm(index LogIndex) (Term, error);
 	GetLogEntries(startIndex LogIndex, endIndex LogIndex) ([]LogEntry, error);
-	GetLastLogIndex() LogIndex;
-	GetLastLogTerm() Term;
-	GetFirstLogIndex(term Term) LogIndex;
+	GetLastLogIndex() (LogIndex, error);
+	GetLastLogTerm() (Term, error);
+	GetFirstLogIndex(term Term) (LogIndex, error);
 	// truncate last ones first
 	TruncateFrom(index LogIndex) error;
 }
@@ -38,6 +38,15 @@ type StateMachine interface {
 // Transport abstracts the network layer. The algorithm only knows NodeIds;
 // each Transport implementation maintains its own address book (NodeId → address).
 // All methods must be safe for concurrent use.
+//
+// Retry policy: implementations MUST retry transient failures (timeouts,
+// connection resets, peer unavailable, etc.) internally with their own
+// backoff strategy until the supplied context is canceled or the call
+// succeeds. Callers will not retry on their own — they treat a returned
+// error as terminal for this attempt. When ctx is canceled, implementations
+// should return promptly with ctx.Err() (context.Canceled or
+// context.DeadlineExceeded). Non-retryable errors (malformed request,
+// permanent peer rejection) should be returned without retry.
 type Transport interface {
 	// SendAppendEntries sends an AppendEntries RPC to the given node.
 	// The context allows the caller to cancel in-flight RPCs (e.g., on shutdown or state transition).
