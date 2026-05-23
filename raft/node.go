@@ -56,9 +56,16 @@ func (n *RaftNode) SetLastCommittedIndex(index LogIndex) {
 }
 
 func (n *RaftNode) Boot() error {
+
+	// By this point, the store should have been initialized with the user implemented store implementation
+
+	// Wrap the store with interpreter to intercept the log entries and detect the membership change type
+	n.Store = NewStoreInterpreter(n.Store, &n.Membership, n.Config.Logger)
+
 	// Wrap the user-provided Store with the circuit breaker (or reset the
 	// existing wrapper for a re-boot). Every Boot gives the node a fresh
 	// counter and an un-tripped breaker.
+
 	if n.Config.StoreErrorThreshold > 0 {
 		if existing, ok := n.Store.(*CircuitBreakerStore); ok {
 			existing.Reset()
