@@ -84,6 +84,10 @@ func (c *CircuitBreakerStore) recordRead(op string, err error) error {
 
 // ─── writes (counted) ────────────────────────────────────────────────
 
+func (c *CircuitBreakerStore) SetState(term Term, nodeId NodeId) error {
+	return c.recordWrite("SetState", c.inner.SetState(term, nodeId))
+}
+
 func (c *CircuitBreakerStore) SetCurrentTerm(term Term) error {
 	return c.recordWrite("SetCurrentTerm", c.inner.SetCurrentTerm(term))
 }

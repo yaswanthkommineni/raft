@@ -18,8 +18,14 @@ type Store interface {
 	GetCurrentTerm() Term
 	// GetVotedFor should be served from memory and not the persistent storage, but it should be updated with the persistent storage
 	GetVotedFor() NodeId
+	// internally should use SetState
 	SetCurrentTerm(term Term) error
+	// internally should use SetState
 	SetVotedFor(nodeId NodeId) error
+
+	// Local versions of term and votedFor are stored, update them once the SetState is successfull, then only return from the function
+	// Encode term and NodeId into a single value and store it into the files
+	SetState(term Term, nodeId NodeId) error
 
 	// Could also get an empty slice, if so don't return error
 	// just blindly overwrite or append the entries at their index, the ones who are using this should deal with the logic

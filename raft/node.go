@@ -86,6 +86,8 @@ func (n *RaftNode) HandleAppendEntries(req AppendEntriesRequest) AppendEntriesRe
 	return <-envelope.RespCh
 }
 
+//TODO: Implement shutting down all the goroutines that are handling the requests when abort is hit
+
 // HandleRequestVote is called by the transport when a RequestVote RPC arrives.
 func (n *RaftNode) HandleRequestVote(req RequestVoteRequest) RequestVoteResponse {
 	envelope := RequestVoteEnvelope{

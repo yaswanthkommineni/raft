@@ -32,12 +32,9 @@ func (candidateState *CandidateState) Run(raftNode *RaftNode) (NodeState, error)
 
 	raftNode.SetLeaderId(0)
 	newTerm := raftNode.Store.GetCurrentTerm() + 1
-	if err := raftNode.Store.SetCurrentTerm(newTerm); err != nil {
+	// Atomic operation on term and votedFor
+	if err := raftNode.Store.SetState(newTerm, raftNode.Config.NodeId); err != nil {
 		return &CandidateState{}, err
-	}
-	if err := raftNode.Store.SetVotedFor(raftNode.Config.NodeId); err != nil {
-		// fatal: term incremented but votedFor not self — Raft invariant violation
-		return &AbortState{}, err
 	}
 
 	candidateState.electionTerm = raftNode.Store.GetCurrentTerm()
@@ -115,7 +112,11 @@ func (candidateState *CandidateState) Run(raftNode *RaftNode) (NodeState, error)
 			peerLogger.Debug("vote rejected", "peer_term", voteResponse.Term)
 			if voteResponse.Term > candidateState.electionTerm {
 				peerLogger.Info("higher term observed in vote rejection", "peer_term", voteResponse.Term)
-				candidateState.electionResultCh <- electionResult{winnerId: 0, winnerTerm: voteResponse.Term}
+				// There is no point in waiting. Only the first element in the elctionResultCh will be read.
+				select {
+				case candidateState.electionResultCh <- electionResult{winnerId: 0, winnerTerm: voteResponse.Term}:
+				default:
+				}
 			}
 		}()
 	})
@@ -130,12 +131,7 @@ loop:
 			cancelCandidateContext()
 			raftNode.SetLeaderId(result.winnerId)
 			if result.winnerTerm > candidateState.electionTerm {
-				if err := raftNode.Store.SetCurrentTerm(result.winnerTerm); err != nil {
-					nextState = &AbortState{}
-					errReturned = err
-					break loop
-				}
-				if err := raftNode.Store.SetVotedFor(0); err != nil {
+				if err := raftNode.Store.SetState(result.winnerTerm, 0); err != nil {
 					nextState = &AbortState{}
 					errReturned = err
 					break loop
@@ -163,9 +159,20 @@ loop:
 			if req.Req.Term > candidateState.electionTerm {
 				logger.Info("higher-term RequestVote during election; stepping down",
 					"peer_id", req.Req.CandidateId, "peer_term", req.Req.Term)
-				candidateState.electionResultCh <- electionResult{winnerId: 0, winnerTerm: req.Req.Term}
+				select {
+				case candidateState.electionResultCh <- electionResult{winnerId: 0, winnerTerm: req.Req.Term}:
+				default:
+				}
 				go func() {
-					raftNode.RequestVoteCh <- req
+					select {
+					case raftNode.RequestVoteCh <- req:
+						// Don't wait if already full. Else it will become a leak incase of abort just after the goroutine is started.
+					default:
+						req.RespCh <- RequestVoteResponse{
+							Term: candidateState.electionTerm,
+							VoteGranted: false,
+						}
+					}
 				}()
 				continue
 			}
@@ -180,9 +187,19 @@ loop:
 			if req.Req.Term >= candidateState.electionTerm {
 				logger.Info("leader observed during election; stepping down",
 					"leader_id", req.Req.LeaderId, "leader_term", req.Req.Term)
-				candidateState.electionResultCh <- electionResult{winnerId: req.Req.LeaderId, winnerTerm: req.Req.Term}
+				select {
+				case candidateState.electionResultCh <- electionResult{winnerId: req.Req.LeaderId, winnerTerm: req.Req.Term}:
+				default:
+				}
 				go func() {
-					raftNode.AppendEntriesCh <- req
+					select {
+					case raftNode.AppendEntriesCh <- req:
+					default:
+						req.RespCh <- AppendEntriesResponse{
+							Term: candidateState.electionTerm,
+							Success: false,
+						}
+					}
 				}()
 				continue
 			}
@@ -194,12 +211,16 @@ loop:
 			}
 
 		case <-candidateContext.Done():
-			if candidateContext.Err() != context.DeadlineExceeded {
-				logger.Warn("candidate context ended unexpectedly; aborting",
-					"error", candidateContext.Err())
-				nextState = &AbortState{}
-				break loop
-			}
+			/*
+				This part of the code is never reached because when the context is cancelled the loop is broken.
+				But the context is cancelled to stope the API requesting votes are needed to be stopped.
+			*/
+			// if candidateContext.Err() != context.DeadlineExceeded {
+			// 	logger.Warn("candidate context ended unexpectedly; aborting",
+			// 		"error", candidateContext.Err())
+			// 	nextState = &AbortState{}
+			// 	break loop
+			// }
 			logger.Info("election timed out; starting a new one")
 			raftNode.SetLeaderId(0)
 			nextState = &CandidateState{}
@@ -226,9 +247,9 @@ func (candidateState *CandidateState) incrementAndCheckVotes(raftNode *RaftNode,
 	newVotes := atomic.LoadUint32(&candidateState.newClusterVotesReceived)
 	logger.Debug("vote counted", "voter_id", votedNode, "old_votes", oldVotes, "new_votes", newVotes)
 	if checkMajority(candidateState.oldClusterSize, oldVotes) && checkMajority(candidateState.newClusterSize, newVotes) {
-		candidateState.electionResultCh <- electionResult{
-			winnerId:   raftNode.Config.NodeId,
-			winnerTerm: candidateState.electionTerm,
+		select {
+		case candidateState.electionResultCh <- electionResult{winnerId: raftNode.Config.NodeId, winnerTerm: candidateState.electionTerm}:
+		default:
 		}
 	}
 }

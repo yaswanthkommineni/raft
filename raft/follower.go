@@ -112,23 +112,14 @@ func (followerState *FollowerState) Run(raftNode *RaftNode) (NodeState, error) {
 				if (x.Req.Term > term) || (raftNode.GetLeaderId() == 0) {
 					if x.Req.Term > term {
 						peerLogger.Info("observed higher term; adopting leader")
-						if err := raftNode.Store.SetCurrentTerm(x.Req.Term); err != nil {
+						if err := raftNode.Store.SetState(x.Req.Term, 0); err != nil {
+							// not fatal, just ignore that you detected a new leader
+							// but if this kept on happening, the circuit breaker will trip and the node will enter the abort state
 							x.RespCh <- AppendEntriesResponse{
 								Term:    term,
 								Success: false,
 							}
 							continue
-						}
-						if err := raftNode.Store.SetVotedFor(0); err != nil {
-							// fatal: term incremented but votedFor not cleared — invariant violation
-							x.RespCh <- AppendEntriesResponse{
-								Term:    term,
-								Success: false,
-							}
-							nextState = &AbortState{}
-							errReturned = err
-							close(stopChan)
-							break loop
 						}
 					} else {
 						peerLogger.Info("first contact with leader at current term")
@@ -247,24 +238,14 @@ func (followerState *FollowerState) Run(raftNode *RaftNode) (NodeState, error) {
 				}
 				if x.Req.Term > term {
 					voteLogger.Info("observed higher term in RequestVote; clearing votedFor")
-					if err := raftNode.Store.SetCurrentTerm(x.Req.Term); err != nil {
+					if err := raftNode.Store.SetState(x.Req.Term, 0); err != nil {
 						// not fatal: term not advanced in store, reject and continue
+						// if this kept on happening, the circuit breaker will trip and the node will enter the abort state
 						x.RespCh <- RequestVoteResponse{
 							Term:        term,
 							VoteGranted: false,
 						}
 						continue
-					}
-					if err := raftNode.Store.SetVotedFor(0); err != nil {
-						// fatal: term incremented but votedFor not cleared — invariant violation
-						x.RespCh <- RequestVoteResponse{
-							Term:        term,
-							VoteGranted: false,
-						}
-						nextState = &AbortState{}
-						errReturned = err
-						close(stopChan)
-						break loop
 					}
 					term = x.Req.Term
 					raftNode.SetLeaderId(0)
