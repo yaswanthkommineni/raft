@@ -1,7 +1,6 @@
-package raft;
+package raft
 
 import (
-	"log/slog"
 	"sync"
 	"time"
 )
@@ -13,113 +12,112 @@ func resetTimer(timer *time.Timer, heartbeatTimeout time.Duration) {
 	if !timer.Stop() {
 		// drain the expiry channel if already expired
 		select {
-		case <- timer.C:
+		case <-timer.C:
 		default:
 		}
 	}
-	timer.Reset(heartbeatTimeout);
+	timer.Reset(heartbeatTimeout)
 }
-
 
 func (followerState *FollowerState) Run(raftNode *RaftNode) (NodeState, error) {
 	logger := raftNode.Config.Logger.With(
 		"state", "follower",
 		"node_id", raftNode.Config.NodeId,
-	);
+	)
 
-	wg := sync.WaitGroup{};
-	heartbeatTimeout := RandomDuration(raftNode.Config.ElectionTimeoutMin, raftNode.Config.ElectionTimeoutMax);
-	timer := time.NewTimer(heartbeatTimeout);
+	wg := sync.WaitGroup{}
+	heartbeatTimeout := RandomDuration(raftNode.Config.ElectionTimeoutMin, raftNode.Config.ElectionTimeoutMax)
+	timer := time.NewTimer(heartbeatTimeout)
 
-	logger.Info("entering follower state", "heartbeat_timeout", heartbeatTimeout);
+	logger.Info("entering follower state", "heartbeat_timeout", heartbeatTimeout)
 
 	// channel to stop the go-routines
-	stopChan := make(chan struct{}, 10);
-	resetTimerChan := make(chan struct{}, 10);
+	stopChan := make(chan struct{}, 10)
+	resetTimerChan := make(chan struct{}, 10)
 
-	wg.Add(1);
+	wg.Add(1)
 	go func() {
-		defer wg.Done();
+		defer wg.Done()
 		for {
 			select {
-			case x := <- raftNode.ClientRequestCh:
-				leaderId := raftNode.GetLeaderId();
-				logger.Debug("redirecting client request to leader", "leader_id", leaderId);
+			case x := <-raftNode.ClientRequestCh:
+				leaderId := raftNode.GetLeaderId()
+				logger.Debug("redirecting client request to leader", "leader_id", leaderId)
 				x.RespCh <- ClientResponse{
 					Success:  false,
 					LeaderId: leaderId,
 				}
-			case <- stopChan:
-				return;
+			case <-stopChan:
+				return
 			}
 		}
-	}();
+	}()
 
-	wg.Add(1);
+	wg.Add(1)
 	// the ownership of timer is handled by this go-routine
 	go func() {
-		defer wg.Done();
+		defer wg.Done()
 		for {
 			select {
-			case <- resetTimerChan:
-				resetTimer(timer, heartbeatTimeout);
+			case <-resetTimerChan:
+				resetTimer(timer, heartbeatTimeout)
 			case <-raftNode.ShutdownCh:
 				// shutdown signal received from top level
-				logger.Info("shutdown signal received");
-				close(stopChan);
-				return;
-			case <- timer.C:
+				logger.Info("shutdown signal received")
+				close(stopChan)
+				return
+			case <-timer.C:
 				// timer expired, shutdown the go-routines
-				logger.Info("heartbeat timeout expired; transitioning to candidate");
-				close(stopChan);
-				return;
-			case <- stopChan:
-				return;
+				logger.Info("heartbeat timeout expired; transitioning to candidate")
+				close(stopChan)
+				return
+			case <-stopChan:
+				return
 			}
 		}
-	}();
+	}()
 
-	var errReturned error;
-	var nextState NodeState;
+	var errReturned error
+	var nextState NodeState
 
-	wg.Add(1);
+	wg.Add(1)
 	go func() {
-		defer wg.Done();
+		defer wg.Done()
 	loop:
 		for {
 			select {
-			case x := <- raftNode.AppendEntriesCh:
-				term := raftNode.Store.GetCurrentTerm();
+			case x := <-raftNode.AppendEntriesCh:
+				term := raftNode.Store.GetCurrentTerm()
 				peerLogger := logger.With(
 					"peer_id", x.Req.LeaderId,
 					"peer_term", x.Req.Term,
 					"current_term", term,
 					"prev_log_index", x.Req.PrevLogIndex,
 					"prev_log_term", x.Req.PrevLogTerm,
-				);
+				)
 
 				// old leader check
 				if x.Req.Term < term {
-					peerLogger.Warn("rejecting AppendEntries from stale leader");
+					peerLogger.Warn("rejecting AppendEntries from stale leader")
 					x.RespCh <- AppendEntriesResponse{
 						Term:    term,
 						Success: false,
 					}
-					continue;
+					continue
 				}
-				select{
+				select {
 				case resetTimerChan <- struct{}{}:
 				default:
 				}
 				if (x.Req.Term > term) || (raftNode.GetLeaderId() == 0) {
 					if x.Req.Term > term {
-						peerLogger.Info("observed higher term; adopting leader");
+						peerLogger.Info("observed higher term; adopting leader")
 						if err := raftNode.Store.SetCurrentTerm(x.Req.Term); err != nil {
 							x.RespCh <- AppendEntriesResponse{
 								Term:    term,
 								Success: false,
 							}
-							continue;
+							continue
 						}
 						if err := raftNode.Store.SetVotedFor(0); err != nil {
 							// fatal: term incremented but votedFor not cleared — invariant violation
@@ -127,135 +125,135 @@ func (followerState *FollowerState) Run(raftNode *RaftNode) (NodeState, error) {
 								Term:    term,
 								Success: false,
 							}
-							nextState = &AbortState{};
-							errReturned = err;
-							close(stopChan);
-							break loop;
+							nextState = &AbortState{}
+							errReturned = err
+							close(stopChan)
+							break loop
 						}
 					} else {
-						peerLogger.Info("first contact with leader at current term");
+						peerLogger.Info("first contact with leader at current term")
 					}
-					term = x.Req.Term;
-					raftNode.SetLeaderId(x.Req.LeaderId);
+					term = x.Req.Term
+					raftNode.SetLeaderId(x.Req.LeaderId)
 				}
 
-				log, err := raftNode.Store.GetLogEntry(x.Req.PrevLogIndex);
+				log, err := raftNode.Store.GetLogEntry(x.Req.PrevLogIndex)
 				if err != nil {
 					if _, ok := err.(LogIndexOutOfBoundsError); ok {
-						lastLogIndex, idxErr := raftNode.Store.GetLastLogIndex();
-						lastLogTerm, termErr := raftNode.Store.GetLastLogTerm();
+						lastLogIndex, idxErr := raftNode.Store.GetLastLogIndex()
+						lastLogTerm, termErr := raftNode.Store.GetLastLogTerm()
 						if idxErr != nil || termErr != nil {
 							// wrapper logged the read errors; reject without conflict hint
 							x.RespCh <- AppendEntriesResponse{
 								Term:    term,
 								Success: false,
 							}
-							continue;
+							continue
 						}
 						peerLogger.Debug("PrevLogIndex past end of local log; replying with conflict hint",
-							"last_log_index", lastLogIndex, "last_log_term", lastLogTerm);
+							"last_log_index", lastLogIndex, "last_log_term", lastLogTerm)
 						x.RespCh <- AppendEntriesResponse{
 							Term:          term,
 							Success:       false,
 							ConflictIndex: lastLogIndex,
 							ConflictTerm:  lastLogTerm,
 						}
-						continue;
+						continue
 					}
 					// Unknown store error — wrapper logged it; reject this RPC (avoids panic on log.Term below).
 					x.RespCh <- AppendEntriesResponse{
 						Term:    term,
 						Success: false,
 					}
-					continue;
+					continue
 				}
 
 				// detected conflict in log
 				if log.Term != x.Req.PrevLogTerm {
-					conflictIndex, err := raftNode.Store.GetFirstLogIndex(log.Term);
+					conflictIndex, err := raftNode.Store.GetFirstLogIndex(log.Term)
 					if err != nil {
 						x.RespCh <- AppendEntriesResponse{
 							Term:    term,
 							Success: false,
 						}
-						continue;
+						continue
 					}
 					peerLogger.Debug("PrevLogTerm mismatch; replying with conflict hint",
 						"local_term_at_prev_index", log.Term,
-						"conflict_index", conflictIndex);
+						"conflict_index", conflictIndex)
 					x.RespCh <- AppendEntriesResponse{
 						Term:          term,
 						Success:       false,
 						ConflictIndex: conflictIndex,
 						ConflictTerm:  log.Term,
 					}
-					continue;
+					continue
 				}
 
-				lastStoreLogIndex, err := raftNode.Store.GetLastLogIndex();
+				lastStoreLogIndex, err := raftNode.Store.GetLastLogIndex()
 				if err != nil {
 					x.RespCh <- AppendEntriesResponse{
 						Term:    term,
 						Success: false,
 					}
-					continue;
+					continue
 				}
-				entriesToPatch, firstUnmatchedIndex := getEntriesToPatch(x.Req.Entries, x.Req.PrevLogIndex, lastStoreLogIndex, raftNode.Store);
-				lastEntriesIndex := firstUnmatchedIndex + LogIndex(len(entriesToPatch)) - 1;
+				entriesToPatch, firstUnmatchedIndex := getEntriesToPatch(x.Req.Entries, x.Req.PrevLogIndex, lastStoreLogIndex, raftNode.Store)
+				lastEntriesIndex := firstUnmatchedIndex + LogIndex(len(entriesToPatch)) - 1
 
 				if len(x.Req.Entries) > 0 {
 					// Truncate (if there's a conflicting tail) then patch. Sequential is fine on a single disk
 					// and gives a clean crash-recovery story.
-					if (lastEntriesIndex < lastStoreLogIndex) && (firstUnmatchedIndex != lastEntriesIndex + 1) {
+					if (lastEntriesIndex < lastStoreLogIndex) && (firstUnmatchedIndex != lastEntriesIndex+1) {
 						// truncate error logged by wrapper; fall through and attempt the patch anyway
-						_ = raftNode.Store.TruncateFrom(lastEntriesIndex + 1);
+						_ = raftNode.Store.TruncateFrom(lastEntriesIndex + 1)
 					}
 					if err := raftNode.Store.PatchEntries(entriesToPatch); err != nil {
 						x.RespCh <- AppendEntriesResponse{
 							Term:    term,
 							Success: false,
 						}
-						continue;
+						continue
 					}
 				}
 
-				commitIndex := min(lastEntriesIndex, x.Req.LeaderCommit);
-				raftNode.SetLastCommittedIndex(commitIndex);
+				commitIndex := min(lastEntriesIndex, x.Req.LeaderCommit)
+				raftNode.SetLastCommittedIndex(commitIndex)
 				peerLogger.Debug("AppendEntries applied",
 					"first_unmatched_index", firstUnmatchedIndex,
 					"last_entries_index", lastEntriesIndex,
-					"commit_index", commitIndex);
+					"commit_index", commitIndex)
 
 				x.RespCh <- AppendEntriesResponse{
 					Term:    term,
 					Success: true,
 				}
 
-			case x := <- raftNode.RequestVoteCh:
-				term := raftNode.Store.GetCurrentTerm();
+			case x := <-raftNode.RequestVoteCh:
+				term := raftNode.Store.GetCurrentTerm()
 				voteLogger := logger.With(
 					"candidate_id", x.Req.CandidateId,
 					"peer_term", x.Req.Term,
 					"current_term", term,
-				);
+				)
 
 				if x.Req.Term < term {
-					voteLogger.Debug("rejecting RequestVote at stale term");
+					voteLogger.Debug("rejecting RequestVote at stale term")
 					x.RespCh <- RequestVoteResponse{
 						Term:        term,
 						VoteGranted: false,
 					}
-					continue;
+					continue
 				}
 				if x.Req.Term > term {
-					voteLogger.Info("observed higher term in RequestVote; clearing votedFor");
+					voteLogger.Info("observed higher term in RequestVote; clearing votedFor")
 					if err := raftNode.Store.SetCurrentTerm(x.Req.Term); err != nil {
 						// not fatal: term not advanced in store, reject and continue
 						x.RespCh <- RequestVoteResponse{
 							Term:        term,
 							VoteGranted: false,
 						}
-						continue;
+						continue
 					}
 					if err := raftNode.Store.SetVotedFor(0); err != nil {
 						// fatal: term incremented but votedFor not cleared — invariant violation
@@ -263,54 +261,54 @@ func (followerState *FollowerState) Run(raftNode *RaftNode) (NodeState, error) {
 							Term:        term,
 							VoteGranted: false,
 						}
-						nextState = &AbortState{};
-						errReturned = err;
-						close(stopChan);
-						break loop;
+						nextState = &AbortState{}
+						errReturned = err
+						close(stopChan)
+						break loop
 					}
-					term = x.Req.Term;
-					raftNode.SetLeaderId(0);
+					term = x.Req.Term
+					raftNode.SetLeaderId(0)
 				}
 
-				votedFor := raftNode.Store.GetVotedFor();
+				votedFor := raftNode.Store.GetVotedFor()
 				if votedFor == 0 {
-					lastLogTerm, termErr := raftNode.Store.GetLastLogTerm();
-					lastLogIndex, idxErr := raftNode.Store.GetLastLogIndex();
+					lastLogTerm, termErr := raftNode.Store.GetLastLogTerm()
+					lastLogIndex, idxErr := raftNode.Store.GetLastLogIndex()
 					if termErr != nil || idxErr != nil {
 						x.RespCh <- RequestVoteResponse{
 							Term:        term,
 							VoteGranted: false,
 						}
-						continue;
+						continue
 					}
 					logUpToDate := (x.Req.LastLogTerm > lastLogTerm) ||
-						(x.Req.LastLogTerm == lastLogTerm && x.Req.LastLogIndex >= lastLogIndex);
+						(x.Req.LastLogTerm == lastLogTerm && x.Req.LastLogIndex >= lastLogIndex)
 					if logUpToDate {
 						if err := raftNode.Store.SetVotedFor(x.Req.CandidateId); err != nil {
 							x.RespCh <- RequestVoteResponse{
 								Term:        term,
 								VoteGranted: false,
 							}
-							continue;
+							continue
 						}
 						select {
 						case resetTimerChan <- struct{}{}:
 						default:
 						}
-						voteLogger.Info("vote granted");
+						voteLogger.Info("vote granted")
 						x.RespCh <- RequestVoteResponse{
 							Term:        term,
 							VoteGranted: true,
 						}
-						continue;
+						continue
 					}
 					voteLogger.Debug("vote rejected: candidate log not up-to-date",
 						"local_last_log_term", lastLogTerm,
 						"local_last_log_index", lastLogIndex,
 						"peer_last_log_term", x.Req.LastLogTerm,
-						"peer_last_log_index", x.Req.LastLogIndex);
+						"peer_last_log_index", x.Req.LastLogIndex)
 				} else {
-					voteLogger.Debug("vote rejected: already voted this term", "voted_for", votedFor);
+					voteLogger.Debug("vote rejected: already voted this term", "voted_for", votedFor)
 				}
 
 				x.RespCh <- RequestVoteResponse{
@@ -318,65 +316,65 @@ func (followerState *FollowerState) Run(raftNode *RaftNode) (NodeState, error) {
 					VoteGranted: false,
 				}
 
-			case <- stopChan:
-				return;
+			case <-stopChan:
+				return
 			}
 		}
-	}();
+	}()
 
-	wg.Wait();
+	wg.Wait()
 
 	// if we are here and the shutdown channel is closed, return the abort state
 	select {
-	case _, ok := <- raftNode.ShutdownCh:
+	case _, ok := <-raftNode.ShutdownCh:
 		if !ok {
-			logger.Info("exiting follower state for shutdown");
-			return &AbortState{}, nil;
+			logger.Info("exiting follower state for shutdown")
+			return &AbortState{}, nil
 		}
 	default:
 	}
 
 	if nextState != nil {
-		return nextState, errReturned;
+		return nextState, errReturned
 	}
 
-	logger.Info("exiting follower state for new election");
-	return &CandidateState{}, nil;
+	logger.Info("exiting follower state for new election")
+	return &CandidateState{}, nil
 }
 
 // implement this using binary search
 // returns the entries to patch along with the index of the first unmatched entry
 func getEntriesToPatch(logEntries []LogEntry, prevLogIndex LogIndex, lastStoreLogIndex LogIndex, store Store) ([]LogEntry, LogIndex) {
 	if len(logEntries) == 0 {
-		return nil, prevLogIndex + 1;
+		return nil, prevLogIndex + 1
 	}
 
 	// in most of the cases, the log entries sent by leader are continous so check that case
 	if lastStoreLogIndex == prevLogIndex {
-		return logEntries, prevLogIndex + 1;
+		return logEntries, prevLogIndex + 1
 	}
 
-	maxBSIndex := LogIndex(min(int(prevLogIndex)+len(logEntries), int(lastStoreLogIndex)));
-	minBSIndex := prevLogIndex + 1;
+	maxBSIndex := LogIndex(min(int(prevLogIndex)+len(logEntries), int(lastStoreLogIndex)))
+	minBSIndex := prevLogIndex + 1
 
 	for maxBSIndex >= minBSIndex {
-		midIndex := (maxBSIndex + minBSIndex) / 2;
-		midLogTerm, err := store.GetLogTerm(midIndex);
+		midIndex := (maxBSIndex + minBSIndex) / 2
+		midLogTerm, err := store.GetLogTerm(midIndex)
 
-		unmatched := false;
+		unmatched := false
 
 		if err != nil {
-			unmatched = true;
+			unmatched = true
 		} else if midLogTerm != logEntries[midIndex-(prevLogIndex+1)].Term {
-			unmatched = true;
+			unmatched = true
 		}
 
 		if unmatched {
-			maxBSIndex = midIndex - 1;
+			maxBSIndex = midIndex - 1
 		} else {
-			minBSIndex = midIndex + 1;
+			minBSIndex = midIndex + 1
 		}
 	}
-	unmatchedIndex := minBSIndex;
-	return logEntries[(unmatchedIndex - (prevLogIndex + 1)):], unmatchedIndex;
+	unmatchedIndex := minBSIndex
+	return logEntries[(unmatchedIndex - (prevLogIndex + 1)):], unmatchedIndex
 }
