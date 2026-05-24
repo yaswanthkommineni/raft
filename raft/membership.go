@@ -2,6 +2,7 @@ package raft
 
 import (
 	"errors"
+	"strconv"
 )
 
 // Membership is the in-memory cluster configuration. It is not persisted
@@ -34,7 +35,7 @@ type Membership struct {
 	ChangeNode     NodeId
 	IsNodeRemoval  bool
 	ChangesHistory Stack[MembershipChange]
-	subscribers []chan MembershipChange
+	subscribers map[string]chan MembershipChange
 }
 
 // cloneState returns a Membership that shares no mutable state with the
@@ -71,6 +72,9 @@ func (membership *Membership) apply(logEntry *LogEntry) error {
 	membershipChange, err := DecodeMembershipChange(logEntry.Data)
 	if err != nil {
 		return err
+	}
+	if membershipChange.NodeId > MaxClusterSize {
+		return errors.New("Node ID : " + strconv.FormatUint(uint64(membershipChange.NodeId), 10) + " exceeds the maximum cluster size")
 	}
 	if membershipChange.Confirmation {
 		if membershipChange.NodeId != membership.ChangeNode {
@@ -166,15 +170,15 @@ func (membership *Membership) forEachNode(callback func(nodeId NodeId, nodeAddre
 }
 
 func (membership *Membership) notifySubscribers(change MembershipChange) {
-	for _, subscriber := range membership.subscribers {
+	for _, ch := range membership.subscribers {
 		select {
-		case subscriber <- change:
+		case ch <- change:
 		default:
 			// ignore if the subscriber is not ready to receive
 		}
 	}
 }
 
-func (membership *Membership) subscribeToMembershipChanges(ch chan MembershipChange) {
-	membership.subscribers = append(membership.subscribers, ch)
+func (membership *Membership) subscribeToMembershipChanges(id string, ch chan MembershipChange) {
+	membership.subscribers[id] = ch
 }

@@ -32,6 +32,16 @@ func DecodeMembershipChange(data []byte) (MembershipChange, error) {
 	return change, nil
 }
 
+func ResetTimer(timer *time.Timer, heartbeatTimeout time.Duration) {
+	if !timer.Stop() {
+		// drain the expiry channel if already expired
+		select {
+		case <-timer.C:
+		default:
+		}
+	}
+	timer.Reset(heartbeatTimeout)
+}
 
 type Stack[T any] []T
 

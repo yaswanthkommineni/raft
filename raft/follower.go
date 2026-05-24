@@ -8,17 +8,6 @@ import (
 type FollowerState struct {
 }
 
-func resetTimer(timer *time.Timer, heartbeatTimeout time.Duration) {
-	if !timer.Stop() {
-		// drain the expiry channel if already expired
-		select {
-		case <-timer.C:
-		default:
-		}
-	}
-	timer.Reset(heartbeatTimeout)
-}
-
 func (followerState *FollowerState) Run(raftNode *RaftNode) (NodeState, error) {
 	logger := raftNode.Config.Logger.With(
 		"state", "follower",
@@ -60,7 +49,7 @@ func (followerState *FollowerState) Run(raftNode *RaftNode) (NodeState, error) {
 		for {
 			select {
 			case <-resetTimerChan:
-				resetTimer(timer, heartbeatTimeout)
+				ResetTimer(timer, heartbeatTimeout)
 			case <-raftNode.ShutdownCh:
 				// shutdown signal received from top level
 				logger.Info("shutdown signal received")
@@ -109,6 +98,7 @@ func (followerState *FollowerState) Run(raftNode *RaftNode) (NodeState, error) {
 				case resetTimerChan <- struct{}{}:
 				default:
 				}
+				// new leader detected
 				if (x.Req.Term > term) || (raftNode.GetLeaderId() == 0) {
 					if x.Req.Term > term {
 						peerLogger.Info("observed higher term; adopting leader")

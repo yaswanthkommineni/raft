@@ -37,6 +37,7 @@ type Store interface {
 	// return LogIndexOutOfBoundsError error
 	GetLogEntry(index LogIndex) (*LogEntry, error)
 	GetLogTerm(index LogIndex) (Term, error)
+	// should return empty slice if the startIndex is greater than the endIndex or the startIndex is greater than the last log index
 	GetLogEntries(startIndex LogIndex, endIndex LogIndex) ([]LogEntry, error)
 	GetLastLogIndex() (LogIndex, error)
 	GetLastLogTerm() (Term, error)
