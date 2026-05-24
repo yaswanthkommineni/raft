@@ -5,17 +5,17 @@ import (
 )
 
 /*
-	Intercepts some of the functions to the store.
-	Detects if the log entry is of membership-change type and applies it
-	to the in-memory Membership before delegating to the underlying Store.
+Intercepts some of the functions to the store.
+Detects if the log entry is of membership-change type and applies it
+to the in-memory Membership before delegating to the underlying Store.
 
-	Why: keep membership-dispatch logic in one place outside Store
-	(separation of concerns). Store stays dumb; algorithm-level routing
-	lives here.
+Why: keep membership-dispatch logic in one place outside Store
+(separation of concerns). Store stays dumb; algorithm-level routing
+lives here.
 
-	Concurrency: relies on the Store single-writer invariant — at most one
-	goroutine ever calls PatchEntries/TruncateFrom at a time, which is also
-	the only goroutine that mutates Membership. See Membership doc.
+Concurrency: relies on the Store single-writer invariant — at most one
+goroutine ever calls PatchEntries/TruncateFrom at a time, which is also
+the only goroutine that mutates Membership. See Membership doc.
 */
 type StoreInterpreter struct {
 	Store
@@ -37,6 +37,8 @@ func NewStoreInterpreter(store Store, membership *Membership, logger *slog.Logge
 // single apply, or the Store write — the real Membership is untouched,
 // keeping in-memory state in lockstep with what is on disk.
 func (storeInterpreter *StoreInterpreter) PatchEntries(entries []LogEntry) error {
+	storeInterpreter.Membership.RwMu.Lock()
+	defer storeInterpreter.Membership.RwMu.Unlock()
 	working := storeInterpreter.Membership.cloneState()
 	for i := range entries {
 		if entries[i].LogType != LogTypeMembership {
@@ -60,6 +62,8 @@ func (storeInterpreter *StoreInterpreter) PatchEntries(entries []LogEntry) error
 // PatchEntries pattern so the failure modes are symmetric: at no point
 // does in-memory Membership get ahead of (or behind) what is on disk.
 func (storeInterpreter *StoreInterpreter) TruncateFrom(index LogIndex) error {
+	storeInterpreter.Membership.RwMu.Lock()
+	defer storeInterpreter.Membership.RwMu.Unlock()
 	working := storeInterpreter.Membership.cloneState()
 	if err := working.revertMembershipChangesTill(index); err != nil {
 		storeInterpreter.logger.Error("failed to stage membership revert", "index", index, "error", err)

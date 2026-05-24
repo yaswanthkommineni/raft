@@ -66,13 +66,12 @@ func (followerState *FollowerState) Run(raftNode *RaftNode) (NodeState, error) {
 		}
 	}()
 
-	var errReturned error
-	var nextState NodeState
+	// var errReturned error
+	// var nextState NodeState
 
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
-	loop:
 		for {
 			select {
 			case x := <-raftNode.AppendEntriesCh:
@@ -305,9 +304,9 @@ func (followerState *FollowerState) Run(raftNode *RaftNode) (NodeState, error) {
 	default:
 	}
 
-	if nextState != nil {
-		return nextState, errReturned
-	}
+	// if nextState != nil {
+	// 	return nextState, errReturned
+	// }
 
 	logger.Info("exiting follower state for new election")
 	return &CandidateState{}, nil

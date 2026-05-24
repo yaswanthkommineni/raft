@@ -21,11 +21,11 @@ type ClientId string
 type SequenceNum uint64
 
 type MembershipChange struct {
-	LogIndex LogIndex
-	NodeId NodeId
-	NodeAddress NodeAddress
+	LogIndex      LogIndex
+	NodeId        NodeId
+	NodeAddress   NodeAddress
 	IsNodeRemoval bool
-	Confirmation bool
+	Confirmation  bool
 	// true if the change is to confirm an already existing membership change ((new) from (old + new))
 }
 

@@ -3,6 +3,7 @@ package raft
 import (
 	"errors"
 	"strconv"
+	"sync"
 )
 
 // Membership is the in-memory cluster configuration. It is not persisted
@@ -22,6 +23,7 @@ import (
 //     RaftNode with snapshot-and-swap.
 //
 // temporary and rebuilt on node restart
+// who ever doing the changes should acquire lock on this
 type Membership struct {
 	// Members is the set of node IDs that are currently part of the cluster.
 	// During a membership change in progress, Members contains the union of the
@@ -30,12 +32,15 @@ type Membership struct {
 	// and adjusted by ±1 depending on whether the change is an add or a remove.
 	Members map[NodeId]NodeAddress
 
+	// mutex log for reads and writes
+	RwMu sync.RWMutex
+
 	// only one node can be added or removed at a time
 	// should be set to 0 if there are no changes in progress
 	ChangeNode     NodeId
 	IsNodeRemoval  bool
 	ChangesHistory Stack[MembershipChange]
-	subscribers map[string]chan MembershipChange
+	subscribers    map[string]chan MembershipChange
 }
 
 // cloneState returns a Membership that shares no mutable state with the
@@ -107,7 +112,6 @@ func (membership *Membership) apply(logEntry *LogEntry) error {
 	return nil
 }
 
-// reverts the last membership change
 func (membership *Membership) revertMembershipChange() error {
 	change, ok := membership.ChangesHistory.Pop()
 	if !ok {
@@ -177,6 +181,10 @@ func (membership *Membership) notifySubscribers(change MembershipChange) {
 			// ignore if the subscriber is not ready to receive
 		}
 	}
+}
+
+func (membership *Membership) unsubscribeFromMembershipChanges(id string) {
+	delete(membership.subscribers, id)
 }
 
 func (membership *Membership) subscribeToMembershipChanges(id string, ch chan MembershipChange) {

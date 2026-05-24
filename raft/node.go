@@ -50,9 +50,11 @@ func (n *RaftNode) SetLeaderId(leaderId NodeId) {
 
 // implement thread save concurrenctly callable getters and setters for the RaftNode's state, such as the last committed index.
 func (n *RaftNode) GetLastCommittedIndex() LogIndex {
+	return LogIndex(atomic.LoadUint64((*uint64)(&n.lastCommittedIndex)))
 }
 
 func (n *RaftNode) SetLastCommittedIndex(index LogIndex) {
+	atomic.StoreUint64((*uint64)(&n.lastCommittedIndex), uint64(index))
 }
 
 func (n *RaftNode) Boot() error {
@@ -147,7 +149,7 @@ func (n *RaftNode) Run() error {
 				return
 			}
 			if err != nil {
-				n.Config.Logger.Error("Last state returned an error:", err, "continuing with next state")
+				n.Config.Logger.Error("Last state returned an error:", err.Error(), "continuing with next state")
 			}
 			n.NodeState = nextState
 		}
