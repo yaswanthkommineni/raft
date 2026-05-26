@@ -10,6 +10,8 @@ type Term uint64
 
 type LogIndex uint64
 
+type LogType uint8
+
 type NodeAddress string
 
 type NodeId uint64
@@ -17,6 +19,15 @@ type NodeId uint64
 type ClientId string
 
 type SequenceNum uint64
+
+type MembershipChange struct {
+	LogIndex      LogIndex
+	NodeId        NodeId
+	NodeAddress   NodeAddress
+	IsNodeRemoval bool
+	Confirmation  bool
+	// true if the change is to confirm an already existing membership change ((new) from (old + new))
+}
 
 type Node struct {
 	NodeId  NodeId
@@ -26,6 +37,7 @@ type Node struct {
 type LogEntry struct {
 	Term        Term
 	LogIndex    LogIndex
+	LogType     LogType
 	Data        []byte
 	ClientId    ClientId
 	SequenceNum SequenceNum
@@ -69,6 +81,8 @@ type ClientResponse struct {
 	Success  bool
 	Data     []byte
 	LeaderId NodeId // for redirect
+	ErrorMessage string
+	ErrorCode int
 }
 
 // Envelope types wrap a request with a response channel for async processing.

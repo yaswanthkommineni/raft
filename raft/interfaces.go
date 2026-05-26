@@ -9,7 +9,10 @@ import (
 // Not an external system inteface, but an internal one to abstract the Raft node's state and behavior. This allows for better modularity and separation of concerns in the implementation.
 // The Store interface defines the methods that a storage backend must implement to be used by the Raft node. This allows for flexibility in choosing different storage implementations, such as in-memory or disk-based storage.
 // The store is dumb the ones who are using this should deal with the logic
-// The implementation of this should be thread safe and atomic => either an operation succeeds or fails, but it should not leave the store in an inconsistent state. This is important for the correctness of the Raft algorithm, as it relies on the consistency of the log and the state of the node.
+//
+// Each individual operation must be atomic — either succeeds or fails, never
+// leaves the store in an inconsistent state.
+//
 // Store should have a dummy log entry at index 0 with term 0 and log index 0
 type Store interface {
 	// State persistence - term and votedFor
@@ -34,6 +37,7 @@ type Store interface {
 	// return LogIndexOutOfBoundsError error
 	GetLogEntry(index LogIndex) (*LogEntry, error)
 	GetLogTerm(index LogIndex) (Term, error)
+	// should return empty slice if the startIndex is greater than the endIndex or the startIndex is greater than the last log index
 	GetLogEntries(startIndex LogIndex, endIndex LogIndex) ([]LogEntry, error)
 	GetLastLogIndex() (LogIndex, error)
 	GetLastLogTerm() (Term, error)

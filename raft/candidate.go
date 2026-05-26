@@ -39,6 +39,7 @@ func (candidateState *CandidateState) Run(raftNode *RaftNode) (NodeState, error)
 
 	candidateState.electionTerm = raftNode.Store.GetCurrentTerm()
 	candidateState.electionResultCh = make(chan electionResult, MaxClusterSize+1)
+	raftNode.Membership.RwMu.RLock()
 	candidateState.oldClusterSize = uint32(len(raftNode.Membership.Members))
 	candidateState.newClusterSize = uint32(len(raftNode.Membership.Members))
 
@@ -49,6 +50,7 @@ func (candidateState *CandidateState) Run(raftNode *RaftNode) (NodeState, error)
 			candidateState.oldClusterSize -= 1
 		}
 	}
+	raftNode.Membership.RwMu.RUnlock()
 
 	logger = logger.With("term", candidateState.electionTerm)
 	logger.Info("election started",
@@ -84,6 +86,7 @@ func (candidateState *CandidateState) Run(raftNode *RaftNode) (NodeState, error)
 	// failures internally until ctx is canceled. The election timeout is the
 	// per-peer budget — a slow peer keeps getting retried until candidateContext
 	// expires, maximizing the chance of collecting that vote.
+	raftNode.Membership.RwMu.RLock()
 	raftNode.Membership.forEachNode(func(nodeId NodeId, nodeAddress NodeAddress) {
 		if nodeId == raftNode.Config.NodeId {
 			return
@@ -120,6 +123,7 @@ func (candidateState *CandidateState) Run(raftNode *RaftNode) (NodeState, error)
 			}
 		}()
 	})
+	raftNode.Membership.RwMu.RUnlock()
 
 	var nextState NodeState
 	var errReturned error
@@ -169,7 +173,7 @@ loop:
 						// Don't wait if already full. Else it will become a leak incase of abort just after the goroutine is started.
 					default:
 						req.RespCh <- RequestVoteResponse{
-							Term: candidateState.electionTerm,
+							Term:        candidateState.electionTerm,
 							VoteGranted: false,
 						}
 					}
@@ -196,7 +200,7 @@ loop:
 					case raftNode.AppendEntriesCh <- req:
 					default:
 						req.RespCh <- AppendEntriesResponse{
-							Term: candidateState.electionTerm,
+							Term:    candidateState.electionTerm,
 							Success: false,
 						}
 					}
@@ -233,6 +237,7 @@ loop:
 }
 
 func (candidateState *CandidateState) incrementAndCheckVotes(raftNode *RaftNode, votedNode NodeId, logger *slog.Logger) {
+	raftNode.Membership.RwMu.RLock()
 	if raftNode.Membership.ChangeNode == votedNode {
 		if raftNode.Membership.IsNodeRemoval {
 			atomic.AddUint32(&candidateState.oldClusterVotesReceived, 1)
@@ -243,6 +248,7 @@ func (candidateState *CandidateState) incrementAndCheckVotes(raftNode *RaftNode,
 		atomic.AddUint32(&candidateState.oldClusterVotesReceived, 1)
 		atomic.AddUint32(&candidateState.newClusterVotesReceived, 1)
 	}
+	raftNode.Membership.RwMu.RUnlock()
 	oldVotes := atomic.LoadUint32(&candidateState.oldClusterVotesReceived)
 	newVotes := atomic.LoadUint32(&candidateState.newClusterVotesReceived)
 	logger.Debug("vote counted", "voter_id", votedNode, "old_votes", oldVotes, "new_votes", newVotes)
@@ -259,5 +265,8 @@ func checkMajority(totalNodes uint32, votesReceived uint32) bool {
 }
 
 func requestVote(ctx context.Context, followerId NodeId, raftNode *RaftNode, req RequestVoteRequest) (RequestVoteResponse, error) {
-	return raftNode.Transport.SendRequestVote(ctx, raftNode.Membership.Members[followerId], req)
+	raftNode.Membership.RwMu.RLock()
+	address := raftNode.Membership.Members[followerId]
+	raftNode.Membership.RwMu.RUnlock()
+	return raftNode.Transport.SendRequestVote(ctx, address, req)
 }
