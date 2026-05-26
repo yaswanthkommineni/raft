@@ -81,6 +81,8 @@ type ClientResponse struct {
 	Success  bool
 	Data     []byte
 	LeaderId NodeId // for redirect
+	ErrorMessage string
+	ErrorCode int
 }
 
 // Envelope types wrap a request with a response channel for async processing.

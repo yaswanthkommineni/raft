@@ -20,6 +20,8 @@ type RaftNode struct {
 	LastAppliedIndex   LogIndex
 	lastCommittedIndex LogIndex
 
+	signalApplyLogChannel chan struct{}
+
 	// Channels for inbound requests
 	AppendEntriesCh chan AppendEntriesEnvelope
 	RequestVoteCh   chan RequestVoteEnvelope
@@ -38,6 +40,24 @@ type RaftNode struct {
 	// storeBreaker is the Store wrapper that tracks consecutive write failures.
 	// nil when Config.StoreErrorThreshold == 0 (breaker disabled).
 	storeBreaker *CircuitBreakerStore
+
+	// FIFO queue of callbacks keyed by log index (append order matches log order).
+	logApplyCallbacks   []logApplyCallback
+	logApplyCallbacksMu sync.Mutex
+}
+
+type logApplyCallback struct {
+	logIndex LogIndex
+	callback func(stateMachineResponse StateMachineResponseData, err error) error
+}
+
+func (n *RaftNode) RegisterCallbackOnLogApply(logIndex LogIndex, callback func(stateMachineResponse StateMachineResponseData, err error) error) {
+	n.logApplyCallbacksMu.Lock()
+	defer n.logApplyCallbacksMu.Unlock()
+	n.logApplyCallbacks = append(n.logApplyCallbacks, logApplyCallback{
+		logIndex: logIndex,
+		callback: callback,
+	})
 }
 
 func (n *RaftNode) GetLeaderId() NodeId {
@@ -55,6 +75,12 @@ func (n *RaftNode) GetLastCommittedIndex() LogIndex {
 
 func (n *RaftNode) SetLastCommittedIndex(index LogIndex) {
 	atomic.StoreUint64((*uint64)(&n.lastCommittedIndex), uint64(index))
+
+	// if a signal already exist, it gets the job done
+	select {
+	case n.signalApplyLogChannel <- struct{}{}:
+	default:
+	}
 }
 
 func (n *RaftNode) Boot() error {
@@ -63,6 +89,8 @@ func (n *RaftNode) Boot() error {
 
 	// Wrap the store with interpreter to intercept the log entries and detect the membership change type
 	n.Store = NewStoreInterpreter(n.Store, &n.Membership, n.Config.Logger)
+
+	n.signalApplyLogChannel = make(chan struct{}, 1)
 
 	// Wrap the user-provided Store with the circuit breaker (or reset the
 	// existing wrapper for a re-boot). Every Boot gives the node a fresh
@@ -118,13 +146,62 @@ func (n *RaftNode) Submit(req ClientRequest) ClientResponse {
 }
 
 func (n *RaftNode) Run() error {
+
+	n.wg.Add(1)
+	// goroutine to that applies the committed logs to the state machine
+	go func() {
+		defer func () {
+			n.wg.Done()
+		}()
+		for {
+			select {
+			case <-n.signalApplyLogChannel:
+				// read once and run the while loop on that, if there is any update in the commit index, next signal's trigger will cover it
+				latestCommittedIndex := n.GetLastCommittedIndex()
+				for latestCommittedIndex > n.LastAppliedIndex {
+					logEntry, err := n.Store.GetLogEntry(n.LastAppliedIndex + 1)
+					if err != nil {
+						n.Config.Logger.Error("Error getting log entry:", err.Error(), "signaling shutdown...")
+						n.exitErr = err
+						n.Shutdown()
+						return
+					}
+					stateMachineResponse, err := n.StateMachine.Apply(logEntry)
+					n.LastAppliedIndex++
+					if err != nil {
+						// IMPORTANT: since the same logs are being applied to the state machines in all the nodes, error should be shown in all the nodes if it is shown here
+						n.Config.Logger.Error("Error applying log entry:", err.Error(), "continuing with next log entries")
+					}
+					for {
+						n.logApplyCallbacksMu.Lock()
+						if len(n.logApplyCallbacks) == 0 || n.logApplyCallbacks[0].logIndex > n.LastAppliedIndex {
+							n.logApplyCallbacksMu.Unlock()
+							break
+						}
+						cb := n.logApplyCallbacks[0]
+						n.logApplyCallbacks = n.logApplyCallbacks[1:]
+						n.logApplyCallbacksMu.Unlock()
+
+						if cbErr := cb.callback(stateMachineResponse, err); cbErr != nil {
+							n.Config.Logger.Error("Error calling callback:", cbErr.Error(), "continuing with next log entries")
+						}
+					}
+				}
+			case <- n.ShutdownCh:
+				return
+			}
+		}
+	}()
+
 	n.wg.Add(1)
 	go func() {
+		defer func () {
+			n.wg.Done()
+		}()
 		for {
 			nextState, err := n.NodeState.Run(n)
 			select {
 			case <-n.ShutdownCh:
-				n.wg.Done()
 				return
 			default:
 			}
@@ -134,7 +211,6 @@ func (n *RaftNode) Run() error {
 			if n.storeBreaker != nil && n.storeBreaker.Tripped() {
 				n.Config.Logger.Error("store circuit breaker tripped; aborting node")
 				n.exitErr = err
-				n.wg.Done()
 				n.Shutdown()
 				return
 			}
@@ -144,7 +220,6 @@ func (n *RaftNode) Run() error {
 				// non-nil err with a non-Abort next state must already have
 				// logged the error themselves.
 				n.exitErr = err
-				n.wg.Done()
 				n.Shutdown()
 				return
 			}

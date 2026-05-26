@@ -90,6 +90,144 @@ func (leaderState *LeaderState) Run(raftNode *RaftNode) (NodeState, error) {
 		leaderState.logger.Debug("leader state completed")
 	}()
 
+	abortSignalChannel := make(chan struct{}, 1)
+
+
+	// separate goroutine to handle the client requests
+	go func () {
+		wg.Add(1)
+		defer func () {
+			wg.Done()
+		}()
+		for {
+			select {
+			case envelope := <-raftNode.ClientRequestCh:
+				lastLogIndex, err := raftNode.Store.GetLastLogIndex()
+				failed := false
+				if err != nil {
+					leaderState.logger.Error("error getting last log index", "error", err)
+					failed = true
+				} else {
+					// only this goroutine can append to the log and update the lastLogIndex, so no race condition here
+					err = raftNode.Store.PatchEntries([]LogEntry{{
+						Term:        leaderState.term,
+						LogIndex:    lastLogIndex + 1,
+						LogType:     LogTypeData,
+						Data:        envelope.Req.Data,
+						ClientId:    envelope.Req.ClientId,
+						SequenceNum: envelope.Req.SequenceNum,
+					}})
+					if err != nil {
+						leaderState.logger.Error("error appending client request to log", "error", err)
+						failed = true
+					} else {
+						leaderState.logger.Info("client request appended to log successfull", "client_id", envelope.Req.ClientId, "sequence_num", envelope.Req.SequenceNum)
+						raftNode.RegisterCallbackOnLogApply(lastLogIndex+1, func(stateMachineResponse StateMachineResponseData, err error) error {
+							if err != nil {
+								leaderState.logger.Error("error calling callback on log apply", "error", err)
+								envelope.RespCh <- ClientResponse{
+									Success:      false,
+									ErrorMessage: "Error applying log entry to the state machine",
+									ErrorCode:    500,
+								}
+								return err
+							}
+							envelope.RespCh <- ClientResponse{
+								Success: true,
+								Data:    stateMachineResponse,
+							}
+							return nil
+						})
+					}
+				}
+				if failed {
+					envelope.RespCh <- ClientResponse{
+						Success:      false,
+						ErrorMessage: "Internal server error",
+						ErrorCode:    500,
+					}
+				}
+			case <- abortSignalChannel:
+				return
+			}
+		}
+	}()
+
+	
+
+	// separate goroutine to handle requests from other nodes
+	go func () {
+		wg.Add(1)
+		defer func(){
+			wg.Done()
+		}()
+		for {
+			select {
+			case req := <- raftNode.AppendEntriesCh:
+				if req.Req.Term < leaderState.term {
+					req.RespCh <- AppendEntriesResponse{
+						Term: leaderState.term,
+						Success: false,
+					}
+					continue
+				}
+				if req.Req.Term == leaderState.term {
+					// split brain detected 
+					// should not be possible but just for sanity check
+					leaderState.logger.Error("split brain detected, rejecting append entries request", "req", req)
+					req.RespCh <- AppendEntriesResponse{
+						Term: leaderState.term,
+						Success: false,
+					}
+					select {
+					case abortSignalChannel <- struct{}{}:
+					default:
+					}
+					return
+				}
+				// new term detected
+				// let the next node handle the request or drop it if the buffer is full
+				select {
+				case raftNode.AppendEntriesCh <- req:
+				default:
+					req.RespCh <- AppendEntriesResponse{
+						Term:    leaderState.term,
+						Success: false,
+					}
+				}
+				leaderState.newTermDetectionChannel <- newTermMessage{
+					Term: req.Req.Term,
+					LeaderId: req.Req.LeaderId,
+				}
+				return
+			case req := <- raftNode.RequestVoteCh:
+				if req.Req.Term <= leaderState.term {
+					req.RespCh <- RequestVoteResponse{
+						Term: leaderState.term,
+						VoteGranted: false,
+					}
+					continue
+				}
+				// new term detected, step down
+				// let the next node handle the request or drop it if the buffer is full
+				select {
+				case raftNode.RequestVoteCh <- req:
+				default:
+					req.RespCh <- RequestVoteResponse{
+						Term: leaderState.term,
+						VoteGranted: false,
+					}
+				}
+				leaderState.newTermDetectionChannel <- newTermMessage{
+					Term: req.Req.Term,
+				}
+				return
+			case <- abortSignalChannel:
+				return
+			}
+		}
+	}()
+
 	for {
 		select {
 		case newTermMsg := <-leaderState.newTermDetectionChannel:
@@ -157,11 +295,17 @@ func (leaderState *LeaderState) Run(raftNode *RaftNode) (NodeState, error) {
 			}
 
 		case <-raftNode.ShutdownCh:
-			leaderState.logger.Info("Received shutdown signal, transitioning to follower")
+			leaderState.logger.Info("Received shutdown signal, shutting down...")
+			select {
+			case abortSignalChannel <- struct{}{}:
+			default:
+			}
+			return &AbortState{}, nil
+
+		case <-abortSignalChannel:
 			return &AbortState{}, nil
 		}
 	}
-
 }
 
 func getMid(arr []LogIndex) LogIndex {
